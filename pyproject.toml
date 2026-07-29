@@ -1,0 +1,87 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cytario_app_sdk"]
+
+[project]
+name = "cytario-app-sdk"
+version = "0.1.0"
+description = "CLI for registering Cytario analysis applications in an OCI Distribution v1.1 registry"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-or-later" }
+authors = [
+    { name = "Cytario" },
+]
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.6",
+    "pyyaml>=6.0",
+    "typer>=0.12",
+    "typer-config[yaml]>=1.4",
+]
+
+[project.scripts]
+cytario-app-sdk = "cytario_app_sdk.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-httpx>=0.30",
+    "respx>=0.21",
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812",  # trailing-comma rule conflicts with the formatter
+    "ISC001",  # implicit-string-concat conflicts with the formatter
+    "D203",    # one-blank-line-before-class (conflicts with D211)
+    "D213",    # multi-line-summary-second-line (conflicts with D212)
+    "FBT001",  # boolean-typed positional/keyword args are idiomatic Typer flags
+    "FBT002",
+    "FBT003",
+    "CPY001",  # no copyright-notice convention in sibling Cytario repos
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "S101",    # asserts are the point of a test suite
+    "S105",    # "hardcoded password" strings are test fixtures
+    "S106",    # same, as a function argument
+    "D",       # docstrings not required on every test function
+    "ANN",     # type annotations not required in tests
+    "ARG001",  # side-effecting fixtures are requested but not read
+    "PLR2004", # magic numbers are fine in test expectations
+    "PLR0913", # fixtures legitimately take many parameters
+    "PLR0917", # same, positional count
+    "INP001",  # tests dir is intentionally not a package
+    "SLF001",  # tests legitimately exercise private helpers
+    "PT004",   # pytest fixture naming without returns is fine
+    "TC003",   # fixtures use Path at runtime; type-checking blocks add noise
+]
+
+"src/cytario_app_sdk/cli.py" = [
+    "PLR0913", # Typer command signatures legitimately take many options
+    "PLR0917", # same, positional count from Annotated defaults
+    "TC003",   # `Path` is needed at runtime for typer's get_type_hints resolution
+]
+
+"src/cytario_app_sdk/oci/client.py" = [
+    "PLR2004", # HTTP status codes (200, 201, 202) are idiomatic literals
+    "TRY003",  # long exception messages are fine for a CLI-facing client
+    "EM102",   # f-strings in exception messages are fine here
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["src"]

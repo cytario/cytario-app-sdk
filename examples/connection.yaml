@@ -1,0 +1,3 @@
+registry: https://harbor.example.com
+user: robot$cytario-catalog
+secret: <robot-token>

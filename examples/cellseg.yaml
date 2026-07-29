@@ -1,0 +1,28 @@
+schemaVersion: 1
+name: cellseg
+display: Cell Segmentation
+description: Runs Cellpose on a 16-bit OME-TIFF.
+image:
+  repository: cytario/cellseg
+  tag: "1.0.0"
+parameterSchema:
+  type: object
+  properties:
+    diameter:
+      type: number
+      default: 30
+  required: []
+inputRoles:
+  - name: image
+    mediaTypes:
+      - image/tiff
+      - application/vnd.cytario.ome-tiff
+outputRoles:
+  - name: segmentation
+    mediaTypes:
+      - application/vnd.cytario.label-mask
+groups:
+  consumers:
+    - cellbio-team
+  maintainers:
+    - imaging-platform
