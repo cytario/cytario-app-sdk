@@ -148,6 +148,64 @@ def test_push_blob_falls_back_to_post_then_put(
     assert descriptor["size"] == len(payload)
 
 
+def test_push_blob_put_preserves_state_param_from_location(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+    repository: str,
+) -> None:
+    """Harbor (docker/distribution) returns 202 with a `Location` carrying an
+    HMAC upload-state token in `?_state=<...>` that the closing PUT must echo
+    back. `blobUploadDispatcher` rejects a missing `_state` as
+    BLOB_UPLOAD_INVALID (HTTP 404). Passing `params={"digest": ...}` to
+    httpx.Client.put would clobber the Location's whole query string (httpx
+    builds `URL(url, params=params)`, which replaces `query`), dropping
+    `_state`. The client must merge `digest` into the Location's existing
+    query instead.
+    """
+    payload = b'{"name":"cellseg"}'
+    digest = _digest(payload)
+    state_token = "hmac-signed-state-token-abc123"
+    upload_url = f"{registry_url}/v2/{repository}/blobs/uploads/uuid-123?_state={state_token}"
+
+    httpx_mock.add_response(
+        method="POST",
+        url=re.compile(re.escape(f"{registry_url}/v2/{repository}/blobs/uploads/") + r"(\?.*)?$"),
+        status_code=202,
+        headers={"Location": upload_url},
+    )
+
+    seen_put_urls: list[str] = []
+
+    def _assert_state_preserved(request: httpx.Request) -> httpx.Response:
+        seen_put_urls.append(str(request.url))
+        assert request.url.params.get("_state") == state_token, (
+            f"_state dropped from PUT URL: {request.url} — "
+            "distribution would reject this with BLOB_UPLOAD_INVALID"
+        )
+        assert request.url.params.get("digest") == digest, f"digest missing from PUT URL: {request.url}"
+        return httpx.Response(
+            201,
+            headers={
+                "Location": f"{registry_url}/v2/{repository}/blobs/{digest}",
+                "Docker-Content-Digest": digest,
+            },
+        )
+
+    httpx_mock.add_callback(
+        _assert_state_preserved,
+        method="PUT",
+        url=re.compile(re.escape(f"{registry_url}/v2/{repository}/blobs/uploads/uuid-123") + r".*"),
+    )
+
+    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
+        client.push_blob(repository, payload)
+
+    assert seen_put_urls, "PUT was never issued"
+    put_url = seen_put_urls[0]
+    assert f"_state={state_token}" in put_url, f"_state missing from: {put_url}"
+    assert "digest=" in put_url, f"digest missing from: {put_url}"
+
+
 def test_push_blob_202_without_location_raises(
     httpx_mock: pytest.FuncFixture,
     registry_url: str,

@@ -152,9 +152,19 @@ class RegistryClient:
             msg = f"registry returned 202 without a Location header for {repository}"
             raise RegistryError(msg, status_code=resp.status_code, body=resp.text)
 
+        # Merge `digest` into the Location's existing query rather than
+        # replacing it. docker/distribution (Harbor) encodes an HMAC upload
+        # state in the Location's `?_state=<token>` param that the closing
+        # PUT must echo back — `blobUploadDispatcher` rejects it as
+        # BLOB_UPLOAD_INVALID (HTTP 404) when `_state` is absent
+        # (registry/handlers/blobupload.go: unpackUploadState). Passing
+        # `params=` to httpx.Client.put would clobber the URL's whole query
+        # string (httpx `Request.__init__` builds `URL(url, params=params)`,
+        # which replaces `query`), so build the URL with `copy_merge_params`
+        # and pass that fully-formed URL with no `params` kwarg.
+        put_url = httpx.URL(location).copy_merge_params({"digest": digest})
         put_resp = self._client.put(
-            location,
-            params={"digest": digest},
+            put_url,
             headers={"Content-Type": "application/octet-stream", "Content-Length": str(len(payload))},
             content=payload,
         )
