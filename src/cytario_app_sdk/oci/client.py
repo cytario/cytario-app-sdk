@@ -19,6 +19,7 @@ v1.1 spec: https://github.com/opencontainers/distribution-spec/blob/main/spec.md
 from __future__ import annotations
 
 import hashlib
+import http.cookiejar
 import json
 from typing import Any
 
@@ -34,6 +35,27 @@ DEFAULT_TIMEOUT = httpx.Timeout(30.0, read=120.0)
 def _sha256_digest(payload: bytes) -> str:
     """Compute the `sha256:<hex>` digest of `payload` (OCI digest format)."""
     return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
+class _NoSessionCookieJar(http.cookiejar.CookieJar):
+    """Cookie jar that silently discards `Set-Cookie` from responses.
+
+    The OCI Distribution client authenticates with HTTP Basic (the
+    `Authorization` header), so it has no use for cookies. Persisting the
+    registry's session cookie is actively harmful on Harbor: Harbor's CSRF
+    middleware skips `/v2/` paths only when the request does NOT carry a
+    session (see `csrfSkipper` in `src/server/middleware/csrf/csrf.go`).
+    httpx's `Client` persists cookies across requests by default, so a
+    `Set-Cookie: sid=...` issued on an earlier `HEAD /v2/.../manifests/...`
+    would be replayed on the follow-up `POST /v2/.../blobs/uploads/`, flipping
+    `CarrySession` to true and making the POST subject to CSRF enforcement —
+    it fails with HTTP 403 `{"errors":[{"code":"FORBIDDEN","message":"CSRF
+    token not found in request"}]}`. Discarding `Set-Cookie` keeps every
+    `/v2/` request sessionless so Harbor's CSRF skipper applies.
+    """
+
+    def extract_cookies(self, response: object, request: object) -> None:  # noqa: ARG002
+        return None
 
 
 class RegistryClient:
@@ -58,6 +80,7 @@ class RegistryClient:
             timeout=self._timeout,
             transport=transport,
             headers={"Accept": MANIFEST_ACCEPT},
+            cookies=_NoSessionCookieJar(),
         )
 
     def close(self) -> None:

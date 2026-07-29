@@ -186,6 +186,64 @@ def test_push_blob_500_raises(
     assert exc_info.value.status_code == 500
 
 
+def test_session_cookie_from_resolve_subject_not_replayed_on_push_blob(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+    repository: str,
+    image_tag: str,
+    image_manifest_digest: str,
+    image_manifest_size: int,
+) -> None:
+    """Harbor issues a `Set-Cookie: sid=...` on the HEAD subject-resolve call.
+
+    httpx persists cookies across requests by default; if that session cookie
+    is replayed on the follow-up `POST /v2/.../blobs/uploads/`, Harbor's CSRF
+    middleware stops skipping `/v2/` (csrfSkipper keys off CarrySession) and
+    the POST fails with HTTP 403 "CSRF token not found in request". The
+    client must discard Set-Cookie so every `/v2/` request stays sessionless.
+    """
+    httpx_mock.add_response(
+        method="HEAD",
+        url=f"{registry_url}/v2/{repository}/manifests/{image_tag}",
+        status_code=200,
+        headers={
+            "Docker-Content-Digest": image_manifest_digest,
+            "Content-Length": str(image_manifest_size),
+            "Content-Type": OCI_MANIFEST_MEDIA_TYPE,
+            "Set-Cookie": "sid=abc-123; Path=/",
+        },
+    )
+
+    cookie_seen: dict[str, str] = {}
+
+    def _assert_no_cookie(request: httpx.Request) -> httpx.Response:
+        cookie_seen["value"] = request.headers.get("cookie", "")
+        assert "sid" not in cookie_seen["value"], (
+            f"session cookie replayed on POST: {cookie_seen['value']!r} — "
+            "Harbor CSRF middleware would reject this request"
+        )
+        digest = _digest(b"x")
+        return httpx.Response(
+            201,
+            headers={
+                "Location": f"{registry_url}/v2/{repository}/blobs/{digest}",
+                "Docker-Content-Digest": digest,
+            },
+        )
+
+    httpx_mock.add_callback(
+        _assert_no_cookie,
+        method="POST",
+        url=re.compile(re.escape(f"{registry_url}/v2/{repository}/blobs/uploads/") + r"(\?.*)?$"),
+    )
+
+    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
+        client.resolve_subject(repository, image_tag)
+        client.push_blob(repository, b"x")
+
+    assert cookie_seen.get("value", "") == "", f"unexpected Cookie header on POST: {cookie_seen['value']!r}"
+
+
 def test_push_manifest_by_digest(
     httpx_mock: pytest.FuncFixture,
     registry_url: str,
