@@ -28,6 +28,7 @@ from cytario_app_sdk import __version__
 from cytario_app_sdk.errors import AppDefinitionError, AppSdkError, RegistryError
 from cytario_app_sdk.models import AppDefinition
 from cytario_app_sdk.oci import RegistryClient, build_app_definition_manifest
+from cytario_app_sdk.oci.manifest import EMPTY_CONFIG_BYTES
 
 app = typer.Typer(
     name="cytario-app-sdk",
@@ -149,6 +150,17 @@ def register(
             definition_descriptor = client.push_blob(definition.image.repository, definition_bytes)
             # The layer's mediaType is the app-definition type, not octet-stream.
             definition_descriptor = {**definition_descriptor, "mediaType": definition.artifact_type}
+            # Harbor validates that every blob referenced by the manifest
+            # exists in the registry before accepting the manifest push — a
+            # missing blob is rejected as MANIFEST_BLOB_UNKNOWN (HTTP 400).
+            # The manifest's `config` is the OCI empty-config blob
+            # (sha256:e3b0c442..., size 0); Harbor does not treat it as
+            # implicitly present the way the reference distribution server
+            # does, so push it explicitly. Re-pushes are a no-op (registries
+            # deduplicate by digest). EMPTY_CONFIG_BYTES is the same bytes
+            # the manifest module hashed to derive EMPTY_CONFIG_DIGEST, so the
+            # blob's digest always matches the manifest's `config.digest`.
+            client.push_blob(definition.image.repository, EMPTY_CONFIG_BYTES)
             manifest = build_app_definition_manifest(
                 subject_descriptor=subject,
                 definition_blob_descriptor=definition_descriptor,

@@ -12,11 +12,16 @@ so the Catalog Adapter can discover it via `GET /v2/<name>/referrers/<digest>`.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, TypedDict
 
 # OCI image-spec empty config: a well-known zero-byte blob.
 # https://github.com/opencontainers/image-spec/blob/main/manifest.md#guidelines-for-creating-an-artifact-manifest
-EMPTY_CONFIG_DIGEST = "sha256:e3b0c44398fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+# The registry does NOT treat it as implicitly present (Harbor requires it to
+# be pushed, see cli.py). Derived from the empty byte string so the digest
+# can never drift from the bytes it claims to describe.
+EMPTY_CONFIG_BYTES = b""
+EMPTY_CONFIG_DIGEST = f"sha256:{hashlib.sha256(EMPTY_CONFIG_BYTES).hexdigest()}"
 EMPTY_CONFIG_SIZE = 0
 EMPTY_CONFIG_MEDIA_TYPE = "application/vnd.oci.empty.v1+json"
 

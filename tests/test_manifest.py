@@ -2,16 +2,31 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 from cytario_app_sdk.oci.manifest import (
+    EMPTY_CONFIG_BYTES,
     EMPTY_CONFIG_DIGEST,
     EMPTY_CONFIG_MEDIA_TYPE,
+    EMPTY_CONFIG_SIZE,
     OCI_MANIFEST_MEDIA_TYPE,
     build_app_definition_manifest,
 )
 
 ARTIFACT_TYPE = "application/vnd.cytario.app-definition.v1+json"
+
+
+def test_empty_config_digest_matches_empty_bytes() -> None:
+    """The manifest's `config.digest` must equal the SHA-256 of the bytes the
+    SDK pushes as the empty config blob. A previous hardcoded constant had a
+    one-character typo (e3b0c443 vs e3b0c442) that made Harbor reject the
+    manifest with MANIFEST_BLOB_UNKNOWN for a blob that could never exist.
+    Deriving the digest from the bytes (and asserting it here) makes that
+    class of bug impossible.
+    """
+    assert f"sha256:{hashlib.sha256(EMPTY_CONFIG_BYTES).hexdigest()}" == EMPTY_CONFIG_DIGEST
+    assert EMPTY_CONFIG_SIZE == len(EMPTY_CONFIG_BYTES) == 0
 
 
 def test_manifest_has_required_oci_fields(subject_descriptor) -> None:  # type: ignore[misc]

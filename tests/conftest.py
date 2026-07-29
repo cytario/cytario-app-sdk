@@ -118,6 +118,7 @@ def mock_push_blob_single_post(
         _cb,
         method="POST",
         url=re.compile(re.escape(f"{registry_url}/v2/{repository}/blobs/uploads/") + r"(\?.*)?$"),
+        is_reusable=True,
     )
 
 
