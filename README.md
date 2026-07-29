@@ -114,11 +114,12 @@ uv run ruff check --fix && uv run ruff format
 uv run pytest
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide,
-[CHANGELOG.md](CHANGELOG.md) for release history, and the
-[Releases workflow](.github/workflows/release.yml) for how versions are cut
-automatically with [python-semantic-release][psr].
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide and the
+[Releases page][releases] for release history. Versions are cut automatically
+with [python-semantic-release][psr] — in no-commit mode, so no release commits
+land on `main`.
 
+[releases]: https://github.com/cytario/cytario-app-sdk/releases
 [psr]: https://github.com/python-semantic-release/python-semantic-release
 
 ## License

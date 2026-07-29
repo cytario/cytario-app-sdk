@@ -78,14 +78,22 @@ When reporting issues, please include:
 
 ## Releasing
 
-Releases are fully automated. Pushing to `main` runs
-[`.github/workflows/release.yml`](.github/workflows/release.yml), which:
+Releases are fully automated and run in **no-commit mode** — no release
+commits land on `main` (org policy forbids committing to `main`). Pushing to
+`main` runs [`.github/workflows/release.yml`](.github/workflows/release.yml),
+which:
 
-1. Runs `python-semantic-release` to bump the version (driven by Conventional
-Commits), update `CHANGELOG.md`, stamp `pyproject.toml` and
-`src/cytario_app_sdk/__init__.py`, build the sdist + wheel, and publish a
-GitHub release with the changelog.
-2. Publishes the built artifacts to [PyPI][pypi] using
+1. Runs `python-semantic-release` `version` with `--no-commit --no-tag
+--no-changelog --skip-build` to compute the next version and stamp it into
+`pyproject.toml` / `src/cytario_app_sdk/__init__.py` in the build's working
+tree only.
+2. Runs `python-semantic-release` `publish --tag v<version>`, which builds the
+sdist + wheel (`uv build`) and creates a GitHub Release for that tag.
+GitHub creates the tag pointing at the current `main` HEAD — no new commit,
+no push to `refs/heads/main`. Release notes are generated from the Conventional
+Commits history and attached to the GitHub Release (no `CHANGELOG.md` file
+is maintained on the branch).
+3. Publishes the built artifacts to [PyPI][pypi] using
 [trusted publishing][trusted-publishing] (OIDC) — no API token is stored in
 the repo. The first release requires a one-time setup of the project as a
 PyPI trusted publisher (see the PyPA guide).

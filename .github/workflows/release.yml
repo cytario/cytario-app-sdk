@@ -1,19 +1,22 @@
 name: Release
 
 # Cuts a new release on every push to `main` that warrants one, using
-# python-semantic-release driven by Conventional Commits. It:
-#   1. bumps the version, updates CHANGELOG.md, stamps the version into
-#      pyproject.toml and src/cytario_app_sdk/__init__.py, commits and tags,
-#   2. builds the sdist + wheel (`uv build`),
-#   3. publishes a GitHub release with the changelog + built artifacts, and
-#   4. publishes the artifacts to PyPI via trusted publishing (OIDC) — no
-#      API token is stored in the repo. The first release needs the project
-#      registered as a PyPI trusted publisher (see CONTRIBUTING.md).
+# python-semantic-release driven by Conventional Commits — WITHOUT creating a
+# new commit on `main` (org policy forbids that). Instead:
 #
-# We run `semantic-release` via `uv run` (not the wrapper action) so the
-# `uv build` build_command inherits the host PATH where `setup-uv` placed
-# the `uv` binary. The wrapper action runs PSR in a Docker container that
-# does not contain `uv`, which makes `uv build` fail with "command not found".
+#   1. `semantic-release version --no-commit --no-tag --no-push --no-vcs-release
+#      --no-changelog --skip-build` computes the next version and stamps it into
+#      pyproject.toml / src/cytario_app_sdk/__init__.py in the working tree only.
+#   2. `semantic-release publish --tag v<version>` runs `uv build` and creates the
+#      GitHub Release for that tag. GitHub creates the tag itself, pointing at the
+#      current HEAD commit — no new commit, no push to `refs/heads/main`.
+#
+# Release notes are generated from the commit history and attached to the
+# GitHub Release (no CHANGELOG.md file is maintained on the branch). The built
+# sdist + wheel are also uploaded as a workflow artifact for the `publish`
+# job, which pushes them to PyPI via trusted publishing (OIDC) — no API token
+# is stored in the repo. The first release needs the project registered as a
+# PyPI trusted publisher (see CONTRIBUTING.md).
 
 on:
   push:
@@ -30,18 +33,21 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}-release-${{ github.ref_name }}
       cancel-in-progress: false
-    permissions:
-      contents: write
     outputs:
-      released: ${{ steps.release.outputs.released }}
-      version: ${{ steps.release.outputs.version }}
-      tag: ${{ steps.release.outputs.tag }}
+      released: ${{ steps.detect.outputs.released }}
+      version: ${{ steps.detect.outputs.version }}
+      tag: ${{ steps.detect.outputs.tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      # Pull tags created by previous runs (GitHub Releases create tags via
+      # the API, not via git push) so PSR can see the last released version.
+      - name: Fetch tags
+        run: git fetch --tags --force origin
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v9.0.0
@@ -51,36 +57,46 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      # Run python-semantic-release directly so `uv build` (the build_command)
-      # runs on the host with `uv` on PATH. GH_TOKEN gives PSR the push access
-      # it needs to commit+tag the release back to the repo.
-      - name: Semantic Release
-        id: release
+      - name: Detect next version
+        id: detect
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          uv run semantic-release -v version
-
-          # PSR commits+tags the release commit when a release is warranted.
-          # A tag pointing at HEAD means a release was published this run.
-          TAG="$(git tag --points-at HEAD)"
-          if [ -n "$TAG" ]; then
+          NEXT="$(uv run semantic-release version --print 2>/dev/null | tail -1 | tr -d '[:space:]')"
+          LAST="$(uv run semantic-release version --print-last-released 2>/dev/null | tail -1 | tr -d '[:space:]')"
+          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "last=$LAST" >> "$GITHUB_OUTPUT"
+          if [ -n "$NEXT" ] && [ "$NEXT" != "$LAST" ]; then
             echo "released=true" >> "$GITHUB_OUTPUT"
-            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-            echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+            echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+            echo "tag=v$NEXT" >> "$GITHUB_OUTPUT"
           else
             echo "released=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Publish GitHub release assets
-        if: steps.release.outputs.released == 'true'
-        uses: python-semantic-release/publish-action@v10.6.1
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ steps.release.outputs.tag }}
+      - name: Stamp version & build distributions
+        if: steps.detect.outputs.released == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Stamp the next version into the working tree (no commit, no tag, no
+          # changelog file, no build) then `publish` builds + creates the release.
+          uv run semantic-release version \
+            --no-commit --no-tag --no-push --no-vcs-release --no-changelog --skip-build
+
+      - name: Publish GitHub release
+        id: publish
+        if: steps.detect.outputs.released == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # `publish` runs build_command (`uv build`) then creates the GitHub
+          # Release for the tag. GitHub creates the tag pointing at HEAD — no
+          # new commit on main, no git push.
+          uv run semantic-release publish --tag "${{ steps.detect.outputs.tag }}"
 
       - name: Upload distribution artifacts
-        if: steps.release.outputs.released == 'true'
+        if: steps.detect.outputs.released == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: dist
@@ -94,9 +110,11 @@ jobs:
           echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.release.outputs.released }}" == "true" ]; then
-            echo "- **Released**: ✓ ${{ steps.release.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
-            echo "- **GitHub**: https://github.com/${{ github.repository }}/releases/tag/${{ steps.release.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Next version**: ${{ steps.detect.outputs.next }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Last released**: ${{ steps.detect.outputs.last }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.detect.outputs.released }}" == "true" ]; then
+            echo "- **Released**: ✓ ${{ steps.detect.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **GitHub**: https://github.com/${{ github.repository }}/releases/tag/${{ steps.detect.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
           else
             echo "- **Released**: ✗ No changes warranting a release" >> $GITHUB_STEP_SUMMARY
           fi
