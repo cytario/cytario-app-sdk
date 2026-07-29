@@ -9,6 +9,11 @@ name: Release
 #   4. publishes the artifacts to PyPI via trusted publishing (OIDC) — no
 #      API token is stored in the repo. The first release needs the project
 #      registered as a PyPI trusted publisher (see CONTRIBUTING.md).
+#
+# We run `semantic-release` via `uv run` (not the wrapper action) so the
+# `uv build` build_command inherits the host PATH where `setup-uv` placed
+# the `uv` binary. The wrapper action runs PSR in a Docker container that
+# does not contain `uv`, which makes `uv build` fail with "command not found".
 
 on:
   push:
@@ -28,7 +33,7 @@ jobs:
     permissions:
       contents: write
     outputs:
-      released: ${{ steps.release.outputs.released || 'false' }}
+      released: ${{ steps.release.outputs.released }}
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
     steps:
@@ -46,23 +51,30 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      # `uv sync` creates `.venv`; expose it so the python-semantic-release
-      # action (which shells out to `semantic-release` and `uv build`) finds
-      # both on PATH.
-      - name: Add .venv to PATH
-        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
-
+      # Run python-semantic-release directly so `uv build` (the build_command)
+      # runs on the host with `uv` on PATH. GH_TOKEN gives PSR the push access
+      # it needs to commit+tag the release back to the repo.
       - name: Semantic Release
         id: release
-        uses: python-semantic-release/python-semantic-release@v10
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          git_committer_name: "github-actions"
-          git_committer_email: "actions@users.noreply.github.com"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          uv run semantic-release -v version
+
+          # PSR commits+tags the release commit when a release is warranted.
+          # A tag pointing at HEAD means a release was published this run.
+          TAG="$(git tag --points-at HEAD)"
+          if [ -n "$TAG" ]; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Publish GitHub release assets
         if: steps.release.outputs.released == 'true'
-        uses: python-semantic-release/publish-action@v10
+        uses: python-semantic-release/publish-action@v10.6.1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ steps.release.outputs.tag }}
@@ -83,8 +95,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
           if [ "${{ steps.release.outputs.released }}" == "true" ]; then
-            echo "- **Released**: ✓ v${{ steps.release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-            echo "- **Tag**: ${{ steps.release.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Released**: ✓ ${{ steps.release.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
             echo "- **GitHub**: https://github.com/${{ github.repository }}/releases/tag/${{ steps.release.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
           else
             echo "- **Released**: ✗ No changes warranting a release" >> $GITHUB_STEP_SUMMARY
