@@ -74,15 +74,17 @@ jobs:
             echo "released=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Stamp version & build distributions
+      - name: Stamp version, create local tag & build distributions
         if: steps.detect.outputs.released == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Stamp the next version into the working tree (no commit, no tag, no
-          # changelog file, no build) then `publish` builds + creates the release.
+          # Stamp the next version into the working tree and create the tag
+          # locally at HEAD, but do NOT commit, push, create a VCS release, or
+          # write a changelog file. `publish` (next step) needs the local tag and
+          # runs `uv build` itself, so we skip the build here too.
           uv run semantic-release version \
-            --no-commit --no-tag --no-push --no-vcs-release --no-changelog --skip-build
+            --no-commit --no-push --no-vcs-release --no-changelog --skip-build
 
       - name: Publish GitHub release
         id: publish
@@ -91,8 +93,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # `publish` runs build_command (`uv build`) then creates the GitHub
-          # Release for the tag. GitHub creates the tag pointing at HEAD — no
-          # new commit on main, no git push.
+          # Release for the tag. GitHub creates the tag on the remote pointing
+          # at HEAD — no new commit on main, no git push.
           uv run semantic-release publish --tag "${{ steps.detect.outputs.tag }}"
 
       - name: Upload distribution artifacts
