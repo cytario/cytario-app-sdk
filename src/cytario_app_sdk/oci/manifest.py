@@ -22,6 +22,18 @@ EMPTY_CONFIG_MEDIA_TYPE = "application/vnd.oci.empty.v1+json"
 
 OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 
+# Accept any image-manifest variant when *reading* a subject: the container image
+# may have been pushed as a Docker v2 schema-2 manifest, an OCI manifest, or a
+# multi-arch index. Listing all of them lets Harbor return whichever the image
+# actually uses instead of 404/406-ing on a narrow Accept.
+MANIFEST_ACCEPT = (
+    f"{OCI_MANIFEST_MEDIA_TYPE}, "
+    "application/vnd.docker.distribution.manifest.v2+json, "
+    "application/vnd.docker.distribution.manifest.list.v2+json, "
+    "application/vnd.docker.distribution.manifest.v1+json, "
+    "application/vnd.oci.image.index.v1+json"
+)
+
 
 class Descriptor(TypedDict):
     """OCI descriptor: mediaType + digest + size (+ optional annotations)."""
@@ -71,6 +83,7 @@ __all__ = [
     "EMPTY_CONFIG_DIGEST",
     "EMPTY_CONFIG_MEDIA_TYPE",
     "EMPTY_CONFIG_SIZE",
+    "MANIFEST_ACCEPT",
     "OCI_MANIFEST_MEDIA_TYPE",
     "Descriptor",
     "build_app_definition_manifest",

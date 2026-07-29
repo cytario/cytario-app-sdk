@@ -26,7 +26,7 @@ import httpx
 from typing_extensions import Self
 
 from cytario_app_sdk.errors import RegistryError
-from cytario_app_sdk.oci.manifest import OCI_MANIFEST_MEDIA_TYPE
+from cytario_app_sdk.oci.manifest import MANIFEST_ACCEPT, OCI_MANIFEST_MEDIA_TYPE
 
 DEFAULT_TIMEOUT = httpx.Timeout(30.0, read=120.0)
 
@@ -57,7 +57,7 @@ class RegistryClient:
             auth=self._auth,
             timeout=self._timeout,
             transport=transport,
-            headers={"Accept": OCI_MANIFEST_MEDIA_TYPE},
+            headers={"Accept": MANIFEST_ACCEPT},
         )
 
     def close(self) -> None:
@@ -83,7 +83,7 @@ class RegistryClient:
         shape required for the `subject` field of a referrer manifest.
         """
         url = f"/v2/{repository}/manifests/{ref}"
-        resp = self._client.head(url, headers={"Accept": OCI_MANIFEST_MEDIA_TYPE})
+        resp = self._client.head(url, headers={"Accept": MANIFEST_ACCEPT})
         if resp.status_code != 200:
             raise RegistryError(
                 f"could not resolve subject manifest {repository}@{ref}",

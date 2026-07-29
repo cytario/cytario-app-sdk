@@ -31,3 +31,4 @@ coverage.xml
 .idea/
 *.swp
 .DS_Store
+/cytario-app-sdk.yaml

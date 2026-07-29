@@ -156,7 +156,9 @@ def register(
             )
             manifest_digest = client.push_manifest(definition.image.repository, manifest)
         except RegistryError as exc:
-            typer.echo(f"error: {exc}", err=True)
+            detail = f" (HTTP {exc.status_code})" if exc.status_code is not None else ""
+            body = f"\n{exc.body}" if exc.body else ""
+            typer.echo(f"error: {exc}{detail}{body}", err=True)
             raise typer.Exit(code=2) from exc
         except AppSdkError as exc:
             typer.echo(f"error: {exc}", err=True)
