@@ -1,5 +1,11 @@
 # cytario-app-sdk
 
+[![PyPI version](https://img.shields.io/pypi/v/cytario-app-sdk.svg)](https://pypi.org/project/cytario-app-sdk/)
+[![Python](https://img.shields.io/pypi/pyversions/cytario-app-sdk.svg)](https://pypi.org/project/cytario-app-sdk/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/cytario/cytario-app-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/cytario/cytario-app-sdk/actions/workflows/ci.yml)
+[![Release](https://github.com/cytario/cytario-app-sdk/actions/workflows/release.yml/badge.svg)](https://github.com/cytario/cytario-app-sdk/actions/workflows/release.yml)
+
 A small CLI for registering Cytario analysis applications in an OCI Distribution
 v1.1 registry (e.g. Harbor 2.13+).
 
@@ -15,14 +21,27 @@ Harbor-specific API.
 
 [oci-referrers]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#listing-referrers
 
-## Install (dev)
+## Install
 
 ```bash
-uv sync
-uv run cytario-app-sdk --help
+pip install cytario-app-sdk
+cytario-app-sdk --help
 ```
 
-## Configuration
+Or with [`uv`](https://docs.astral.sh/uv/):
+
+```bash
+uv tool install cytario-app-sdk
+```
+
+## Quick start
+
+```bash
+cytario-app-sdk --registry https://harbor.example.com \
+  --user 'robot$cytario-catalog' \
+  --secret <robot-token> \
+  register examples/cellseg.yaml
+```
 
 Connection settings (registry endpoint, user, secret) can be supplied on the
 command line or via a YAML config file consumed by [typer-config][typer-config]:
@@ -37,7 +56,13 @@ secret: <robot-token>
 [typer-config]: https://github.com/maxb2/typer-config
 
 ```bash
-uv run cytario-app-sdk --config cytario-app-sdk.yaml register examples/cellseg.yaml
+cytario-app-sdk --config cytario-app-sdk.yaml register examples/cellseg.yaml
+```
+
+Validate an app-definition without pushing anything:
+
+```bash
+cytario-app-sdk --config cytario-app-sdk.yaml register --dry-run examples/cellseg.yaml
 ```
 
 ## Registering an app
@@ -80,8 +105,23 @@ it up via the Referrers API; no Harbor-specific calls are made.
 
 ## Development
 
+This project uses [`uv`](https://docs.astral.sh/uv/) and targets Python 3.10+.
+
 ```bash
-uv run ruff check --fix
-uv run ruff format
+uv sync                          # install deps into .venv
+uv run cytario-app-sdk --help    # run the CLI
+uv run ruff check --fix && uv run ruff format
 uv run pytest
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide,
+[CHANGELOG.md](CHANGELOG.md) for release history, and the
+[Releases workflow](.github/workflows/release.yml) for how versions are cut
+automatically with [python-semantic-release][psr].
+
+[psr]: https://github.com/python-semantic-release/python-semantic-release
+
+## License
+
+Released under the [MIT License](LICENSE). By contributing, you agree that
+your contributions will be licensed under the MIT License.

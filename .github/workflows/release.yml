@@ -1,0 +1,126 @@
+name: Release
+
+# Cuts a new release on every push to `main` that warrants one, using
+# python-semantic-release driven by Conventional Commits. It:
+#   1. bumps the version, updates CHANGELOG.md, stamps the version into
+#      pyproject.toml and src/cytario_app_sdk/__init__.py, commits and tags,
+#   2. builds the sdist + wheel (`uv build`),
+#   3. publishes a GitHub release with the changelog + built artifacts, and
+#   4. publishes the artifacts to PyPI via trusted publishing (OIDC) — no
+#      API token is stored in the repo. The first release needs the project
+#      registered as a PyPI trusted publisher (see CONTRIBUTING.md).
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Semantic release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: ${{ github.workflow }}-release-${{ github.ref_name }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    outputs:
+      released: ${{ steps.release.outputs.released || 'false' }}
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync
+
+      # `uv sync` creates `.venv`; expose it so the python-semantic-release
+      # action (which shells out to `semantic-release` and `uv build`) finds
+      # both on PATH.
+      - name: Add .venv to PATH
+        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Semantic Release
+        id: release
+        uses: python-semantic-release/python-semantic-release@v10
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          git_committer_name: "github-actions"
+          git_committer_email: "actions@users.noreply.github.com"
+
+      - name: Publish GitHub release assets
+        if: steps.release.outputs.released == 'true'
+        uses: python-semantic-release/publish-action@v10
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ steps.release.outputs.tag }}
+
+      - name: Upload distribution artifacts
+        if: steps.release.outputs.released == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Generate Summary
+        if: always()
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.release.outputs.released }}" == "true" ]; then
+            echo "- **Released**: ✓ v${{ steps.release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Tag**: ${{ steps.release.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **GitHub**: https://github.com/${{ github.repository }}/releases/tag/${{ steps.release.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Released**: ✗ No changes warranting a release" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  publish:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    environment:
+      name: pypi
+      url: https://pypi.org/project/cytario-app-sdk/
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          print-hash: true
+          verbose: true
+
+      - name: Generate Summary
+        if: always()
+        run: |
+          echo "## PyPI Publish Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: ${{ needs.release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **PyPI**: https://pypi.org/project/cytario-app-sdk/${{ needs.release.outputs.version }}/" >> $GITHUB_STEP_SUMMARY
