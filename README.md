@@ -44,19 +44,26 @@ cytario-app-sdk --registry https://harbor.example.com \
 ```
 
 Connection settings (registry endpoint, user, secret) can be supplied on the
-command line or via a YAML config file consumed by [typer-config][typer-config]:
-
-```yaml
-# cytario-app-sdk.yaml
-registry: https://harbor.example.com
-user: robot$cytario-catalog
-secret: <robot-token>
-```
-
-[typer-config]: https://github.com/maxb2/typer-config
+command line or via a YAML config file. Pass it explicitly with `--config`:
 
 ```bash
 cytario-app-sdk --config cytario-app-sdk.yaml register examples/cellseg.yaml
+```
+
+…or skip `--config` entirely and let the CLI auto-discover one. When no
+`--config` is given, the CLI probes, in order:
+
+1. `./cytario-app-sdk.yaml` — project-local (committed for a team, or a personal
+   untracked file at the repo root).
+2. `~/.config/cytario-app-sdk/config.yaml` — user-global default.
+
+The first existing file wins. If neither is found, the CLI falls back to
+`--registry/--user/--secret` flags (or `--dry-run`, which needs no connection).
+
+```bash
+cd ~/work/cytario/cytario-app-sdk
+cytario-app-sdk register examples/cellseg.yaml          # picks up ./cytario-app-sdk.yaml
+cytario-app-sdk register --dry-run examples/cellseg.yaml   # no connection needed
 ```
 
 Validate an app-definition without pushing anything:

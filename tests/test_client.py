@@ -355,3 +355,327 @@ def test_push_manifest_failure_raises(
     ):
         client.push_manifest(repository, {"schemaVersion": 2})
     assert exc_info.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Read-side: list_repositories / list_tags / list_referrers / pull_blob
+# ---------------------------------------------------------------------------
+
+
+def test_list_repositories_single_page(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+) -> None:
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{registry_url}/v2/_catalog?n=100",
+        status_code=200,
+        json={"repositories": ["cytario/cellseg", "cytario/qc"]},
+    )
+    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
+        repos = client.list_repositories()
+    assert repos == ["cytario/cellseg", "cytario/qc"]
+
+
+def test_list_repositories_paginated_follows_link_header(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+) -> None:
+    """The distribution spec paginates `_catalog` via `Link: rel="next"`."""
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{registry_url}/v2/_catalog?n=2",
+        status_code=200,
+        json={"repositories": ["a/one", "a/two"]},
+        headers={
+            "Link": f'<{registry_url}/v2/_catalog?n=2&last=a/two>; rel="next"',
+        },
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{registry_url}/v2/_catalog?n=2&last=a/two",
+        status_code=200,
+        json={"repositories": ["b/three"]},
+        # no Link → last page
+    )
+    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
+        repos = client.list_repositories(page_size=2)
+    assert repos == ["a/one", "a/two", "b/three"]
+
+
+def test_list_repositories_namespace_filter(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+) -> None:
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{registry_url}/v2/_catalog?n=100",
+        status_code=200,
+        json={"repositories": ["cytario/cellseg", "other/x", "cytario/qc"]},
+    )
+    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
+        repos = client.list_repositories(namespace="cytario")
+    assert repos == ["cytario/cellseg", "cytario/qc"]
+
+
+def test_list_repositories_error_raises(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+) -> None:
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{registry_url}/v2/_catalog?n=100",
+        status_code=500,
+        text="internal error",
+    )
+    with (
+        RegistryClient(registry=registry_url, user="u", secret="s") as client,
+        pytest.raises(RegistryError) as exc_info,
+    ):
+        client.list_repositories()
+    assert exc_info.value.status_code == 500
+
+
+def test_list_tags(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+    repository: str,
+) -> None:
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{registry_url}/v2/{repository}/tags/list",
+        status_code=200,
+        json={"name": repository, "tags": ["1.0.0", "latest", "1.1.0"]},
+    )
+    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
+        tags = client.list_tags(repository)
+    assert tags == ["1.0.0", "latest", "1.1.0"]
+
+
+def test_list_tags_null_tags_returns_empty(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+    repository: str,
+) -> None:
+    """Some registries return `{"tags": null}` for a tagless repository."""
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{registry_url}/v2/{repository}/tags/list",
+        status_code=200,
+        json={"name": repository, "tags": None},
+    )
+    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
+        tags = client.list_tags(repository)
+    assert tags == []
+
+
+def test_list_tags_404_returns_empty(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+    repository: str,
+) -> None:
+    """A 404 (NAME_UNKNOWN / no tags) degrades to an empty list, not an error,
+    so the catalog scanner can skip tagless repos without try/except glue.
+    """
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{registry_url}/v2/{repository}/tags/list",
+        status_code=404,
+        json={"errors": [{"code": "NAME_UNKNOWN", "message": "unknown name"}]},
+    )
+    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
+        tags = client.list_tags(repository)
+    assert tags == []
+
+
+def test_list_tags_error_raises(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+    repository: str,
+) -> None:
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{registry_url}/v2/{repository}/tags/list",
+        status_code=401,
+        text="unauthorized",
+    )
+    with (
+        RegistryClient(registry=registry_url, user="u", secret="s") as client,
+        pytest.raises(RegistryError) as exc_info,
+    ):
+        client.list_tags(repository)
+    assert exc_info.value.status_code == 401
+
+
+def test_list_referrers(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+    repository: str,
+    image_manifest_digest: str,
+) -> None:
+    app_def_type = "application/vnd.cytario.app-definition.v1+json"
+    signature_type = "application/vnd.cytario.app-definition.signature.v1+json"
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{registry_url}/v2/{repository}/referrers/{image_manifest_digest}",
+        status_code=200,
+        json={
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [
+                {
+                    "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+                    "digest": "sha256:" + "f" * 64,
+                    "size": 512,
+                    "artifactType": app_def_type,
+                },
+                {
+                    "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+                    "digest": "sha256:" + "e" * 64,
+                    "size": 256,
+                    "artifactType": signature_type,
+                },
+            ],
+        },
+    )
+    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
+        referrers = client.list_referrers(repository, image_manifest_digest)
+    assert len(referrers) == 2
+    assert {r["artifactType"] for r in referrers} == {app_def_type, signature_type}
+
+
+def test_list_referrers_filter_by_artifact_type(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+    repository: str,
+    image_manifest_digest: str,
+) -> None:
+    app_def_type = "application/vnd.cytario.app-definition.v1+json"
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{registry_url}/v2/{repository}/referrers/{image_manifest_digest}",
+        status_code=200,
+        json={
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [
+                {
+                    "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+                    "digest": "sha256:" + "f" * 64,
+                    "size": 512,
+                    "artifactType": app_def_type,
+                },
+                {
+                    "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+                    "digest": "sha256:" + "e" * 64,
+                    "size": 256,
+                    "artifactType": "application/vnd.dev.cosign.simplesigning.v1+json",
+                },
+            ],
+        },
+    )
+    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
+        referrers = client.list_referrers(repository, image_manifest_digest, artifact_type=app_def_type)
+    assert len(referrers) == 1
+    assert referrers[0]["artifactType"] == app_def_type
+
+
+def test_list_referrers_error_raises(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+    repository: str,
+    image_manifest_digest: str,
+) -> None:
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{registry_url}/v2/{repository}/referrers/{image_manifest_digest}",
+        status_code=404,
+        json={"errors": [{"code": "NAME_UNKNOWN", "message": "unknown name"}]},
+    )
+    with (
+        RegistryClient(registry=registry_url, user="u", secret="s") as client,
+        pytest.raises(RegistryError) as exc_info,
+    ):
+        client.list_referrers(repository, image_manifest_digest)
+    assert exc_info.value.status_code == 404
+
+
+def test_pull_blob(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+    repository: str,
+) -> None:
+    payload = b'{"name":"cellseg","schemaVersion":1}'
+    blob_digest = _digest(payload)
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{registry_url}/v2/{repository}/blobs/{blob_digest}",
+        status_code=200,
+        content=payload,
+    )
+    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
+        blob = client.pull_blob(repository, blob_digest)
+    assert blob == payload
+
+
+def test_pull_blob_error_raises(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+    repository: str,
+) -> None:
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{registry_url}/v2/{repository}/blobs/sha256:missing",
+        status_code=404,
+        json={"errors": [{"code": "BLOB_UNKNOWN", "message": "unknown blob"}]},
+    )
+    with (
+        RegistryClient(registry=registry_url, user="u", secret="s") as client,
+        pytest.raises(RegistryError) as exc_info,
+    ):
+        client.pull_blob(repository, "sha256:missing")
+    assert exc_info.value.status_code == 404
+
+
+def test_pull_manifest(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+    repository: str,
+    image_manifest_digest: str,
+) -> None:
+    manifest = {
+        "schemaVersion": 2,
+        "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+        "artifactType": "application/vnd.cytario.app-definition.v1+json",
+        "config": {"mediaType": "x", "digest": "sha256:0", "size": 0},
+        "layers": [{"mediaType": "x", "digest": "sha256:abc", "size": 10}],
+        "subject": {"mediaType": OCI_MANIFEST_MEDIA_TYPE, "digest": image_manifest_digest, "size": 4096},
+    }
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{registry_url}/v2/{repository}/manifests/{image_manifest_digest}",
+        status_code=200,
+        json=manifest,
+    )
+    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
+        result = client.pull_manifest(repository, image_manifest_digest)
+    assert result == manifest
+
+
+def test_pull_manifest_error_raises(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+    repository: str,
+) -> None:
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{registry_url}/v2/{repository}/manifests/sha256:gone",
+        status_code=404,
+        json={"errors": [{"code": "MANIFEST_UNKNOWN", "message": "unknown manifest"}]},
+    )
+    with (
+        RegistryClient(registry=registry_url, user="u", secret="s") as client,
+        pytest.raises(RegistryError) as exc_info,
+    ):
+        client.pull_manifest(repository, "sha256:gone")
+    assert exc_info.value.status_code == 404

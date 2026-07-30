@@ -205,6 +205,124 @@ class RegistryClient:
             )
         return resp.headers.get("Docker-Content-Digest", digest)
 
+    # ------------------------------------------------------------------
+    # Read-side OCI Distribution endpoints (catalog discovery)
+    # ------------------------------------------------------------------
+
+    def list_repositories(
+        self,
+        *,
+        namespace: str | None = None,
+        page_size: int = 100,
+    ) -> list[str]:
+        """GET `/v2/_catalog` with pagination, optionally filtered by namespace.
+
+        Returns repository names (`cytario/cellseg`, …). `namespace`, when
+        given, filters client-side by `<namespace>/` prefix (the spec has no
+        server-side namespace filter). Pagination follows the `Link: rel="next"`
+        header per the distribution spec.
+        """
+        repositories: list[str] = []
+        url: str | httpx.URL = "/v2/_catalog"
+        seen_pages = 0
+        while url is not None:
+            resp = self._client.get(url, params={"n": page_size} if url == "/v2/_catalog" else None)
+            if resp.status_code != 200:
+                msg = "could not list repository catalog"
+                raise RegistryError(
+                    msg,
+                    status_code=resp.status_code,
+                    body=resp.text,
+                )
+            body = resp.json()
+            repositories.extend(body.get("repositories", []))
+            next_url = resp.links.get("next")
+            url = next_url["url"] if isinstance(next_url, dict) else next_url
+            seen_pages += 1
+            if seen_pages > 1000:
+                msg = "repository catalog pagination did not terminate after 1000 pages"
+                raise RegistryError(msg)
+        if namespace is not None:
+            prefix = f"{namespace}/"
+            repositories = [r for r in repositories if r.startswith(prefix)]
+        return repositories
+
+    def list_tags(self, repository: str) -> list[str]:
+        """GET `/v2/<name>/tags/list` → the repository's tags.
+
+        Returns an empty list when the repository exists but has no tags
+        (some registries return `{"tags": null}`); raises `RegistryError`
+        when the repository does not exist.
+        """
+        resp = self._client.get(f"/v2/{repository}/tags/list")
+        if resp.status_code == 404:
+            return []
+        if resp.status_code != 200:
+            raise RegistryError(
+                f"could not list tags for {repository}",
+                status_code=resp.status_code,
+                body=resp.text,
+            )
+        return list(resp.json().get("tags") or [])
+
+    def list_referrers(
+        self,
+        repository: str,
+        subject_digest: str,
+        *,
+        artifact_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """GET `/v2/<name>/referrers/<digest>` → referrer manifest descriptors.
+
+        Returns a list of OCI descriptors (`mediaType`, `digest`, `size`,
+        plus optional `artifactType`/`annotations`). `artifact_type`, when
+        given, filters client-side for portability (the `?artifactType=`
+        query param is not universally supported by registries).
+        """
+        resp = self._client.get(f"/v2/{repository}/referrers/{subject_digest}")
+        if resp.status_code != 200:
+            raise RegistryError(
+                f"could not list referrers for {repository}@{subject_digest}",
+                status_code=resp.status_code,
+                body=resp.text,
+            )
+        manifests = resp.json().get("manifests", [])
+        if artifact_type is not None:
+            manifests = [m for m in manifests if m.get("artifactType") == artifact_type]
+        return manifests
+
+    def pull_blob(self, repository: str, digest: str) -> bytes:
+        """GET `/v2/<name>/blobs/<digest>` → the blob bytes.
+
+        Used to fetch the app-definition JSON layer from a referrer manifest.
+        """
+        resp = self._client.get(f"/v2/{repository}/blobs/{digest}")
+        if resp.status_code != 200:
+            raise RegistryError(
+                f"could not pull blob {repository}@{digest}",
+                status_code=resp.status_code,
+                body=resp.text,
+            )
+        return resp.content
+
+    def pull_manifest(self, repository: str, ref: str) -> dict[str, Any]:
+        """GET `/v2/<name>/manifests/<ref>` → the manifest as a dict.
+
+        `ref` is a tag or digest. Used to fetch a referrer manifest so the
+        caller can read its `layers[].digest` and pull the app-definition blob.
+        """
+        resp = self._client.get(
+            f"/v2/{repository}/manifests/{ref}",
+            headers={"Accept": MANIFEST_ACCEPT},
+        )
+        if resp.status_code != 200:
+            raise RegistryError(
+                f"could not pull manifest {repository}@{ref}",
+                status_code=resp.status_code,
+                body=resp.text,
+            )
+        return resp.json()
+
 
 def _canonical_json(payload: dict[str, Any]) -> bytes:
     """Serialize `payload` as deterministic UTF-8 JSON (sorted keys, no spaces).
