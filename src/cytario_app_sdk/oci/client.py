@@ -1,16 +1,14 @@
 """Minimal OCI Distribution v1.1 client over httpx.
 
-Implements only the three operations the `register` command needs:
+Implements only the two operations the ``register`` command needs to attach
+the app-definition as an OCI Image Format annotation on the image manifest:
 
-  * `resolve_subject`   — HEAD `/v2/<name>/manifests/<ref>` to get the
-    container image manifest descriptor (digest + size + mediaType) for the
-    `subject` field of the referrer.
-  * `push_blob`         — monolithic blob upload: POST to start a session,
-    then PUT the bytes with the digest. Falls back to a single-POST upload
-    when the registry supports it.
-  * `push_manifest`     — PUT `/v2/<name>/manifests/<digest>` (referrer
-    manifests are pushed by digest; the registry indexes them under the
-    referrers list for `subject.digest`).
+  * ``fetch_manifest`` — ``GET /v2/<name>/manifests/<ref>`` to retrieve the
+    current image manifest (its media type + digest come from the response
+    headers).
+  * ``put_manifest``   — ``PUT /v2/<name>/manifests/<ref>`` to store the
+    annotated manifest back under the original tag. The new content digest
+    (returned by the registry) pins both the image and the definition.
 
 No Harbor-specific APIs are used. The endpoint set is the OCI Distribution
 v1.1 spec: https://github.com/opencontainers/distribution-spec/blob/main/spec.md
@@ -32,26 +30,31 @@ from cytario_app_sdk.oci.manifest import MANIFEST_ACCEPT, OCI_MANIFEST_MEDIA_TYP
 DEFAULT_TIMEOUT = httpx.Timeout(30.0, read=120.0)
 
 
-def _sha256_digest(payload: bytes) -> str:
-    """Compute the `sha256:<hex>` digest of `payload` (OCI digest format)."""
-    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+def _canonical_json(payload: dict[str, Any]) -> bytes:
+    """Serialize ``payload`` as deterministic UTF-8 JSON (sorted keys, no spaces).
+
+    Deterministic serialization makes the manifest digest stable across runs,
+    which lets the SDK (and the registry) treat a re-push as a no-op when the
+    content is unchanged.
+    """
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 class _NoSessionCookieJar(http.cookiejar.CookieJar):
-    """Cookie jar that silently discards `Set-Cookie` from responses.
+    """Cookie jar that silently discards ``Set-Cookie`` from responses.
 
     The OCI Distribution client authenticates with HTTP Basic (the
-    `Authorization` header), so it has no use for cookies. Persisting the
+    ``Authorization`` header), so it has no use for cookies. Persisting the
     registry's session cookie is actively harmful on Harbor: Harbor's CSRF
-    middleware skips `/v2/` paths only when the request does NOT carry a
-    session (see `csrfSkipper` in `src/server/middleware/csrf/csrf.go`).
-    httpx's `Client` persists cookies across requests by default, so a
-    `Set-Cookie: sid=...` issued on an earlier `HEAD /v2/.../manifests/...`
-    would be replayed on the follow-up `POST /v2/.../blobs/uploads/`, flipping
-    `CarrySession` to true and making the POST subject to CSRF enforcement —
-    it fails with HTTP 403 `{"errors":[{"code":"FORBIDDEN","message":"CSRF
-    token not found in request"}]}`. Discarding `Set-Cookie` keeps every
-    `/v2/` request sessionless so Harbor's CSRF skipper applies.
+    middleware skips ``/v2/`` paths only when the request does NOT carry a
+    session (see ``csrfSkipper`` in ``src/server/middleware/csrf/csrf.go``).
+    httpx's ``Client`` persists cookies across requests by default, so a
+    ``Set-Cookie: sid=...`` issued on an earlier ``GET /v2/.../manifests/...``
+    would be replayed on the follow-up ``PUT /v2/.../manifests/...``, flipping
+    ``CarrySession`` to true and making the PUT subject to CSRF enforcement —
+    it fails with HTTP 403 ``{"errors":[{"code":"FORBIDDEN","message":"CSRF
+    token not found in request"}]}``. Discarding ``Set-Cookie`` keeps every
+    ``/v2/`` request sessionless so Harbor's CSRF skipper applies.
     """
 
     def extract_cookies(self, response: object, request: object) -> None:  # noqa: ARG002
@@ -70,7 +73,7 @@ class RegistryClient:
         timeout: httpx.Timeout | None = None,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
-        """Create a client authenticated to `registry` via HTTP Basic."""
+        """Create a client authenticated to ``registry`` via HTTP Basic."""
         self._base = registry.rstrip("/")
         self._auth = httpx.BasicAuth(user, secret)
         self._timeout = timeout or DEFAULT_TIMEOUT
@@ -99,120 +102,74 @@ class RegistryClient:
     # OCI Distribution endpoints
     # ------------------------------------------------------------------
 
-    def resolve_subject(self, repository: str, ref: str) -> dict[str, Any]:
-        """HEAD `/v2/<name>/manifests/<ref>` → the image manifest descriptor.
+    def fetch_manifest(
+        self,
+        repository: str,
+        ref: str,
+    ) -> tuple[dict[str, Any], str, str]:
+        """``GET /v2/<name>/manifests/<ref>`` → ``(manifest, media_type, digest)``.
 
-        `ref` is a tag or digest. Returns `{mediaType, digest, size}` — the
-        shape required for the `subject` field of a referrer manifest.
+        ``ref`` is a tag or digest. Returns the parsed manifest, the manifest's
+        media type (from ``Content-Type``), and its content digest (from
+        ``Docker-Content-Digest``). The media type is echoed back on the
+        subsequent ``put_manifest`` so the registry stores the annotated manifest
+        as the same kind.
         """
         url = f"/v2/{repository}/manifests/{ref}"
-        resp = self._client.head(url, headers={"Accept": MANIFEST_ACCEPT})
+        resp = self._client.get(url, headers={"Accept": MANIFEST_ACCEPT})
         if resp.status_code != 200:
             raise RegistryError(
-                f"could not resolve subject manifest {repository}@{ref}",
+                f"could not fetch manifest {repository}@{ref}",
                 status_code=resp.status_code,
                 body=resp.text,
             )
         try:
-            digest = resp.headers["Docker-Content-Digest"]
-            size = int(resp.headers["Content-Length"])
-            media_type = resp.headers.get("Content-Type", OCI_MANIFEST_MEDIA_TYPE)
-        except KeyError as exc:
-            missing = exc.args[0]
-            msg = f"registry response missing required header {missing} for {repository}@{ref}"
+            manifest = resp.json()
+        except json.JSONDecodeError as exc:
+            msg = f"manifest response for {repository}@{ref} was not valid JSON"
             raise RegistryError(msg, status_code=resp.status_code, body=resp.text) from exc
-        return {"mediaType": media_type, "digest": digest, "size": size}
-
-    def push_blob(self, repository: str, payload: bytes) -> dict[str, Any]:
-        """Monolithic blob upload. Returns the blob descriptor.
-
-        Tries the single-POST form first (POST `/v2/<name>/blobs/uploads/?digest=...`).
-        If the registry returns 202 (session started), falls back to POST+PUT.
-        """
-        digest = _sha256_digest(payload)
-        # Try single-POST upload first.
-        resp = self._client.post(
-            f"/v2/{repository}/blobs/uploads/",
-            params={"digest": digest},
-            headers={"Content-Type": "application/octet-stream", "Content-Length": str(len(payload))},
-            content=payload,
-        )
-        if resp.status_code == 201:
-            return {"mediaType": "application/octet-stream", "digest": digest, "size": len(payload)}
-        if resp.status_code != 202:
-            raise RegistryError(
-                f"blob upload start failed for {repository}",
-                status_code=resp.status_code,
-                body=resp.text,
-            )
-
-        # Fall back to POST + PUT. The 202 gave us a Location to PUT to.
-        location = resp.headers.get("Location")
-        if not location:
-            msg = f"registry returned 202 without a Location header for {repository}"
+        media_type = resp.headers.get("Content-Type", OCI_MANIFEST_MEDIA_TYPE)
+        digest = resp.headers.get("Docker-Content-Digest", "")
+        if not digest:
+            msg = f"registry response missing Docker-Content-Digest for {repository}@{ref}"
             raise RegistryError(msg, status_code=resp.status_code, body=resp.text)
+        return manifest, media_type, digest
 
-        # Merge `digest` into the Location's existing query rather than
-        # replacing it. docker/distribution (Harbor) encodes an HMAC upload
-        # state in the Location's `?_state=<token>` param that the closing
-        # PUT must echo back — `blobUploadDispatcher` rejects it as
-        # BLOB_UPLOAD_INVALID (HTTP 404) when `_state` is absent
-        # (registry/handlers/blobupload.go: unpackUploadState). Passing
-        # `params=` to httpx.Client.put would clobber the URL's whole query
-        # string (httpx `Request.__init__` builds `URL(url, params=params)`,
-        # which replaces `query`), so build the URL with `copy_merge_params`
-        # and pass that fully-formed URL with no `params` kwarg.
-        put_url = httpx.URL(location).copy_merge_params({"digest": digest})
-        put_resp = self._client.put(
-            put_url,
-            headers={"Content-Type": "application/octet-stream", "Content-Length": str(len(payload))},
-            content=payload,
-        )
-        if put_resp.status_code != 201:
-            raise RegistryError(
-                f"blob upload PUT failed for {repository}",
-                status_code=put_resp.status_code,
-                body=put_resp.text,
-            )
-        return {"mediaType": "application/octet-stream", "digest": digest, "size": len(payload)}
-
-    def push_manifest(
+    def put_manifest(
         self,
         repository: str,
+        ref: str,
         manifest: dict[str, Any],
         *,
-        reference: str | None = None,
+        media_type: str,
     ) -> str:
-        """PUT `/v2/<name>/manifests/<ref>`. Returns the manifest digest.
+        """``PUT /v2/<name>/manifests/<ref>`` → the new manifest digest.
 
-        If `reference` is None, the manifest is pushed by its own digest (the
-        referrer pattern — the registry indexes it under the subject's
-        referrers list).
+        Stores ``manifest`` under ``ref`` (the original tag) with the given
+        ``media_type`` as ``Content-Type`` so the registry treats it as the same
+        kind of manifest that was fetched. Returns the new content digest the
+        registry reports (from ``Docker-Content-Digest``); because the
+        app-definition annotation is now part of the manifest content, this
+        digest pins both the image and the definition.
         """
         payload = _canonical_json(manifest)
-        digest = _sha256_digest(payload)
-        ref = reference or digest
+        url = f"/v2/{repository}/manifests/{ref}"
         resp = self._client.put(
-            f"/v2/{repository}/manifests/{ref}",
-            headers={"Content-Type": OCI_MANIFEST_MEDIA_TYPE},
+            url,
+            headers={"Content-Type": media_type},
             content=payload,
         )
-        if resp.status_code != 201:
+        if resp.status_code not in (200, 201):
             raise RegistryError(
                 f"manifest push failed for {repository}@{ref}",
                 status_code=resp.status_code,
                 body=resp.text,
             )
-        return resp.headers.get("Docker-Content-Digest", digest)
-
-
-def _canonical_json(payload: dict[str, Any]) -> bytes:
-    """Serialize `payload` as deterministic UTF-8 JSON (sorted keys, no spaces).
-
-    Deterministic serialization makes the manifest digest stable across runs,
-    which lets the SDK (and the registry) treat a re-push as a no-op.
-    """
-    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        digest = resp.headers.get("Docker-Content-Digest")
+        if not digest:
+            # Compute the digest ourselves so callers always get one.
+            digest = f"sha256:{hashlib.sha256(payload).hexdigest()}"
+        return digest
 
 
 __all__ = ["RegistryClient"]

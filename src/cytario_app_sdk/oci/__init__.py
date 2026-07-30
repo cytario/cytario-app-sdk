@@ -3,6 +3,6 @@
 from __future__ import annotations
 
 from cytario_app_sdk.oci.client import RegistryClient
-from cytario_app_sdk.oci.manifest import build_app_definition_manifest
+from cytario_app_sdk.oci.manifest import APPDEF_ANNOTATION_KEY, attach_definition_annotation
 
-__all__ = ["RegistryClient", "build_app_definition_manifest"]
+__all__ = ["APPDEF_ANNOTATION_KEY", "RegistryClient", "attach_definition_annotation"]

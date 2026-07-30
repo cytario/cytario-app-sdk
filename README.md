@@ -11,15 +11,15 @@ v1.1 registry (e.g. Harbor 2.13+).
 
 Cytario's "app catalog" is our concept, not the registry's: an analysis
 application is a container image plus a metadata document (the *app-definition*)
-that declares the app's parameter schema, input/output roles, and consumer /
-maintainer groups. The SDK attaches the app-definition to the container image
-as an [OCI Referrer][oci-referrers] — a manifest with `artifactType:
-application/vnd.cytario.app-definition.v1+json` whose `subject` points at the
-container image's manifest digest. The Cytario catalog adapter discovers
-app-definitions via `GET /v2/<name>/referrers/<image-digest>` and never needs a
-Harbor-specific API.
-
-[oci-referrers]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#listing-referrers
+that declares the app's parameter schema, input/output data roles, and consumer
+/ maintainer groups. The SDK attaches the app-definition to the container image
+as an **OCI Image Format annotation** (`org.cytario.appdef.v1`) on the image
+manifest, then PUTs the manifest back under its original tag. Because the
+annotation is part of the manifest content, the manifest's immutable content
+digest binds the definition to the exact image — pinning the image by digest
+also pins the definition. The Cytario runtime fetches the manifest via
+`GET /v2/<name>/manifests/<ref>` and reads the definition from its annotations;
+no Harbor-specific API is used.
 
 ## Install
 
@@ -98,10 +98,12 @@ groups:
     - imaging-platform
 ```
 
-`register` resolves the container image manifest (by tag or digest), builds the
-app-definition artifact, pushes it as a blob, and pushes an OCI image manifest
-with `subject` set to the container image descriptor. The catalog adapter picks
-it up via the Referrers API; no Harbor-specific calls are made.
+`register` fetches the container image manifest (by tag or digest), builds the
+app-definition document, attaches it as the `org.cytario.appdef.v1` annotation
+on the manifest, and PUTs the manifest back under the original tag. The new
+manifest digest (returned by the registry) pins both the image and the
+definition. The Cytario runtime reads the annotation back via
+`GET /v2/<name>/manifests/<ref>`; no Harbor-specific calls are made.
 
 ## Development
 

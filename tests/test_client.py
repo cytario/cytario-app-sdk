@@ -11,48 +11,78 @@ import pytest
 
 from cytario_app_sdk.errors import RegistryError
 from cytario_app_sdk.oci.client import RegistryClient
-from cytario_app_sdk.oci.manifest import OCI_MANIFEST_MEDIA_TYPE
+from cytario_app_sdk.oci.manifest import MANIFEST_ACCEPT, OCI_MANIFEST_MEDIA_TYPE
 
 
 def _digest(payload: bytes) -> str:
     return f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
 
-def test_resolve_subject_returns_descriptor(
+def test_fetch_manifest_returns_manifest_media_type_and_digest(
     httpx_mock: pytest.FuncFixture,
     registry_url: str,
     repository: str,
     image_tag: str,
+    image_manifest: dict,
     image_manifest_digest: str,
-    image_manifest_size: int,
+    image_manifest_media_type: str,
 ) -> None:
     httpx_mock.add_response(
-        method="HEAD",
+        method="GET",
         url=f"{registry_url}/v2/{repository}/manifests/{image_tag}",
         status_code=200,
         headers={
             "Docker-Content-Digest": image_manifest_digest,
-            "Content-Length": str(image_manifest_size),
-            "Content-Type": OCI_MANIFEST_MEDIA_TYPE,
+            "Content-Type": image_manifest_media_type,
         },
+        json=image_manifest,
     )
     with RegistryClient(registry=registry_url, user="u", secret="s") as client:
-        descriptor = client.resolve_subject(repository, image_tag)
-    assert descriptor == {
-        "mediaType": OCI_MANIFEST_MEDIA_TYPE,
-        "digest": image_manifest_digest,
-        "size": image_manifest_size,
-    }
+        manifest, media_type, digest = client.fetch_manifest(repository, image_tag)
+    assert manifest == image_manifest
+    assert media_type == image_manifest_media_type
+    assert digest == image_manifest_digest
 
 
-def test_resolve_subject_404_raises_registry_error(
+def test_fetch_manifest_sends_accept_header(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+    repository: str,
+    image_tag: str,
+    image_manifest: dict,
+    image_manifest_digest: str,
+) -> None:
+    seen_accept: dict[str, str] = {}
+
+    def _cb(request: httpx.Request) -> httpx.Response:
+        seen_accept["value"] = request.headers.get("accept", "")
+        return httpx.Response(
+            200,
+            headers={
+                "Docker-Content-Digest": image_manifest_digest,
+                "Content-Type": OCI_MANIFEST_MEDIA_TYPE,
+            },
+            content=json.dumps(image_manifest).encode("utf-8"),
+        )
+
+    httpx_mock.add_callback(
+        _cb,
+        method="GET",
+        url=f"{registry_url}/v2/{repository}/manifests/{image_tag}",
+    )
+    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
+        client.fetch_manifest(repository, image_tag)
+    assert MANIFEST_ACCEPT in seen_accept["value"]
+
+
+def test_fetch_manifest_404_raises_registry_error(
     httpx_mock: pytest.FuncFixture,
     registry_url: str,
     repository: str,
     image_tag: str,
 ) -> None:
     httpx_mock.add_response(
-        method="HEAD",
+        method="GET",
         url=f"{registry_url}/v2/{repository}/manifests/{image_tag}",
         status_code=404,
         json={"errors": [{"code": "NAME_UNKNOWN", "message": "unknown name"}]},
@@ -61,265 +91,71 @@ def test_resolve_subject_404_raises_registry_error(
         RegistryClient(registry=registry_url, user="u", secret="s") as client,
         pytest.raises(RegistryError) as exc_info,
     ):
-        client.resolve_subject(repository, image_tag)
+        client.fetch_manifest(repository, image_tag)
     assert exc_info.value.status_code == 404
 
 
-def test_resolve_subject_missing_digest_header_raises(
+def test_fetch_manifest_missing_digest_header_raises(
     httpx_mock: pytest.FuncFixture,
     registry_url: str,
     repository: str,
     image_tag: str,
+    image_manifest: dict,
 ) -> None:
     httpx_mock.add_response(
-        method="HEAD",
+        method="GET",
         url=f"{registry_url}/v2/{repository}/manifests/{image_tag}",
         status_code=200,
-        headers={"Content-Length": "10"},  # no Docker-Content-Digest
+        headers={"Content-Type": OCI_MANIFEST_MEDIA_TYPE},
+        json=image_manifest,
     )
     with (
         RegistryClient(registry=registry_url, user="u", secret="s") as client,
         pytest.raises(RegistryError, match="Docker-Content-Digest"),
     ):
-        client.resolve_subject(repository, image_tag)
+        client.fetch_manifest(repository, image_tag)
 
 
-def test_push_blob_single_post(
-    httpx_mock: pytest.FuncFixture,
-    registry_url: str,
-    repository: str,
-) -> None:
-    payload = b'{"name":"cellseg"}'
-
-    def _cb(request: httpx.Request) -> httpx.Response:
-        assert request.url.params["digest"] == _digest(payload)
-        assert request.content == payload
-        return httpx.Response(
-            201,
-            headers={
-                "Location": f"{registry_url}/v2/{repository}/blobs/{_digest(payload)}",
-                "Docker-Content-Digest": _digest(payload),
-            },
-        )
-
-    httpx_mock.add_callback(
-        _cb,
-        method="POST",
-        url=re.compile(re.escape(f"{registry_url}/v2/{repository}/blobs/uploads/") + r"(\?.*)?$"),
-    )
-    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
-        descriptor = client.push_blob(repository, payload)
-    assert descriptor == {
-        "mediaType": "application/octet-stream",
-        "digest": _digest(payload),
-        "size": len(payload),
-    }
-
-
-def test_push_blob_falls_back_to_post_then_put(
-    httpx_mock: pytest.FuncFixture,
-    registry_url: str,
-    repository: str,
-) -> None:
-    payload = b'{"name":"cellseg"}'
-    digest = _digest(payload)
-    upload_url = f"{registry_url}/v2/{repository}/blobs/uploads/uuid-123"
-
-    # First POST returns 202 with a Location.
-    httpx_mock.add_response(
-        method="POST",
-        url=re.compile(re.escape(f"{registry_url}/v2/{repository}/blobs/uploads/") + r"(\?.*)?$"),
-        status_code=202,
-        headers={"Location": upload_url},
-    )
-    # Then PUT to the Location closes the upload.
-    httpx_mock.add_response(
-        method="PUT",
-        url=re.compile(re.escape(upload_url) + r"\?.*"),
-        status_code=201,
-        headers={
-            "Location": f"{registry_url}/v2/{repository}/blobs/{digest}",
-            "Docker-Content-Digest": digest,
-        },
-    )
-    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
-        descriptor = client.push_blob(repository, payload)
-    assert descriptor["digest"] == digest
-    assert descriptor["size"] == len(payload)
-
-
-def test_push_blob_put_preserves_state_param_from_location(
-    httpx_mock: pytest.FuncFixture,
-    registry_url: str,
-    repository: str,
-) -> None:
-    """Harbor (docker/distribution) returns 202 with a `Location` carrying an
-    HMAC upload-state token in `?_state=<...>` that the closing PUT must echo
-    back. `blobUploadDispatcher` rejects a missing `_state` as
-    BLOB_UPLOAD_INVALID (HTTP 404). Passing `params={"digest": ...}` to
-    httpx.Client.put would clobber the Location's whole query string (httpx
-    builds `URL(url, params=params)`, which replaces `query`), dropping
-    `_state`. The client must merge `digest` into the Location's existing
-    query instead.
-    """
-    payload = b'{"name":"cellseg"}'
-    digest = _digest(payload)
-    state_token = "hmac-signed-state-token-abc123"
-    upload_url = f"{registry_url}/v2/{repository}/blobs/uploads/uuid-123?_state={state_token}"
-
-    httpx_mock.add_response(
-        method="POST",
-        url=re.compile(re.escape(f"{registry_url}/v2/{repository}/blobs/uploads/") + r"(\?.*)?$"),
-        status_code=202,
-        headers={"Location": upload_url},
-    )
-
-    seen_put_urls: list[str] = []
-
-    def _assert_state_preserved(request: httpx.Request) -> httpx.Response:
-        seen_put_urls.append(str(request.url))
-        assert request.url.params.get("_state") == state_token, (
-            f"_state dropped from PUT URL: {request.url} — "
-            "distribution would reject this with BLOB_UPLOAD_INVALID"
-        )
-        assert request.url.params.get("digest") == digest, f"digest missing from PUT URL: {request.url}"
-        return httpx.Response(
-            201,
-            headers={
-                "Location": f"{registry_url}/v2/{repository}/blobs/{digest}",
-                "Docker-Content-Digest": digest,
-            },
-        )
-
-    httpx_mock.add_callback(
-        _assert_state_preserved,
-        method="PUT",
-        url=re.compile(re.escape(f"{registry_url}/v2/{repository}/blobs/uploads/uuid-123") + r".*"),
-    )
-
-    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
-        client.push_blob(repository, payload)
-
-    assert seen_put_urls, "PUT was never issued"
-    put_url = seen_put_urls[0]
-    assert f"_state={state_token}" in put_url, f"_state missing from: {put_url}"
-    assert "digest=" in put_url, f"digest missing from: {put_url}"
-
-
-def test_push_blob_202_without_location_raises(
-    httpx_mock: pytest.FuncFixture,
-    registry_url: str,
-    repository: str,
-) -> None:
-    payload = b"x"
-    httpx_mock.add_response(
-        method="POST",
-        url=re.compile(re.escape(f"{registry_url}/v2/{repository}/blobs/uploads/") + r"(\?.*)?$"),
-        status_code=202,
-        # no Location header
-    )
-    with (
-        RegistryClient(registry=registry_url, user="u", secret="s") as client,
-        pytest.raises(RegistryError, match="Location"),
-    ):
-        client.push_blob(repository, payload)
-
-
-def test_push_blob_500_raises(
-    httpx_mock: pytest.FuncFixture,
-    registry_url: str,
-    repository: str,
-) -> None:
-    httpx_mock.add_response(
-        method="POST",
-        url=re.compile(re.escape(f"{registry_url}/v2/{repository}/blobs/uploads/") + r"(\?.*)?$"),
-        status_code=500,
-        text="internal error",
-    )
-    with (
-        RegistryClient(registry=registry_url, user="u", secret="s") as client,
-        pytest.raises(RegistryError) as exc_info,
-    ):
-        client.push_blob(repository, b"x")
-    assert exc_info.value.status_code == 500
-
-
-def test_session_cookie_from_resolve_subject_not_replayed_on_push_blob(
+def test_fetch_manifest_non_json_body_raises(
     httpx_mock: pytest.FuncFixture,
     registry_url: str,
     repository: str,
     image_tag: str,
     image_manifest_digest: str,
-    image_manifest_size: int,
 ) -> None:
-    """Harbor issues a `Set-Cookie: sid=...` on the HEAD subject-resolve call.
-
-    httpx persists cookies across requests by default; if that session cookie
-    is replayed on the follow-up `POST /v2/.../blobs/uploads/`, Harbor's CSRF
-    middleware stops skipping `/v2/` (csrfSkipper keys off CarrySession) and
-    the POST fails with HTTP 403 "CSRF token not found in request". The
-    client must discard Set-Cookie so every `/v2/` request stays sessionless.
-    """
     httpx_mock.add_response(
-        method="HEAD",
+        method="GET",
         url=f"{registry_url}/v2/{repository}/manifests/{image_tag}",
         status_code=200,
         headers={
             "Docker-Content-Digest": image_manifest_digest,
-            "Content-Length": str(image_manifest_size),
             "Content-Type": OCI_MANIFEST_MEDIA_TYPE,
-            "Set-Cookie": "sid=abc-123; Path=/",
         },
+        content=b"<<not json>>",
     )
-
-    cookie_seen: dict[str, str] = {}
-
-    def _assert_no_cookie(request: httpx.Request) -> httpx.Response:
-        cookie_seen["value"] = request.headers.get("cookie", "")
-        assert "sid" not in cookie_seen["value"], (
-            f"session cookie replayed on POST: {cookie_seen['value']!r} — "
-            "Harbor CSRF middleware would reject this request"
-        )
-        digest = _digest(b"x")
-        return httpx.Response(
-            201,
-            headers={
-                "Location": f"{registry_url}/v2/{repository}/blobs/{digest}",
-                "Docker-Content-Digest": digest,
-            },
-        )
-
-    httpx_mock.add_callback(
-        _assert_no_cookie,
-        method="POST",
-        url=re.compile(re.escape(f"{registry_url}/v2/{repository}/blobs/uploads/") + r"(\?.*)?$"),
-    )
-
-    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
-        client.resolve_subject(repository, image_tag)
-        client.push_blob(repository, b"x")
-
-    assert cookie_seen.get("value", "") == "", f"unexpected Cookie header on POST: {cookie_seen['value']!r}"
+    with (
+        RegistryClient(registry=registry_url, user="u", secret="s") as client,
+        pytest.raises(RegistryError, match="not valid JSON"),
+    ):
+        client.fetch_manifest(repository, image_tag)
 
 
-def test_push_manifest_by_digest(
+def test_put_manifest_returns_registry_digest(
     httpx_mock: pytest.FuncFixture,
     registry_url: str,
     repository: str,
+    image_tag: str,
 ) -> None:
     manifest = {
         "schemaVersion": 2,
         "mediaType": OCI_MANIFEST_MEDIA_TYPE,
-        "artifactType": "application/vnd.cytario.app-definition.v1+json",
         "config": {"mediaType": "x", "digest": "sha256:0", "size": 0},
         "layers": [],
-        "subject": {"mediaType": OCI_MANIFEST_MEDIA_TYPE, "digest": "sha256:subj", "size": 1},
+        "annotations": {"org.cytario.appdef.v1": "{}"},
     }
-    payload = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    expected_digest = _digest(payload)
+    expected_digest = "sha256:registry-reported-digest"
 
     def _cb(request: httpx.Request) -> httpx.Response:
-        assert request.content == payload
         return httpx.Response(
             201,
             headers={
@@ -331,21 +167,96 @@ def test_push_manifest_by_digest(
     httpx_mock.add_callback(
         _cb,
         method="PUT",
-        url=re.compile(rf"{registry_url}/v2/{repository}/manifests/sha256:[a-f0-9]+"),
+        url=re.compile(rf"{registry_url}/v2/{repository}/manifests/{re.escape(image_tag)}"),
     )
     with RegistryClient(registry=registry_url, user="u", secret="s") as client:
-        returned_digest = client.push_manifest(repository, manifest)
-    assert returned_digest == expected_digest
+        digest = client.put_manifest(repository, image_tag, manifest, media_type=OCI_MANIFEST_MEDIA_TYPE)
+    assert digest == expected_digest
 
 
-def test_push_manifest_failure_raises(
+def test_put_manifest_sends_content_type_and_canonical_body(
     httpx_mock: pytest.FuncFixture,
     registry_url: str,
     repository: str,
+    image_tag: str,
+) -> None:
+    manifest = {
+        "schemaVersion": 2,
+        "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+        "config": {"mediaType": "x", "digest": "sha256:0", "size": 0},
+        "layers": [],
+    }
+    seen: dict[str, object] = {}
+
+    def _cb(request: httpx.Request) -> httpx.Response:
+        seen["content_type"] = request.headers.get("content-type", "")
+        seen["body"] = request.content
+        return httpx.Response(201, headers={"Docker-Content-Digest": _digest(request.content)})
+
+    httpx_mock.add_callback(
+        _cb,
+        method="PUT",
+        url=re.compile(rf"{registry_url}/v2/{repository}/manifests/{re.escape(image_tag)}"),
+    )
+    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
+        client.put_manifest(
+            repository,
+            image_tag,
+            manifest,
+            media_type="application/vnd.docker.distribution.manifest.v2+json",
+        )
+    assert seen["content_type"] == "application/vnd.docker.distribution.manifest.v2+json"
+    # Body is canonical JSON (sorted keys, no spaces).
+    assert seen["body"] == json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def test_put_manifest_accepts_200_or_201(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+    repository: str,
+    image_tag: str,
 ) -> None:
     httpx_mock.add_response(
         method="PUT",
-        url=re.compile(rf"{registry_url}/v2/{repository}/manifests/sha256:[a-f0-9]+"),
+        url=re.compile(rf"{registry_url}/v2/{repository}/manifests/{re.escape(image_tag)}"),
+        status_code=200,
+        headers={"Docker-Content-Digest": "sha256:ok"},
+    )
+    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
+        digest = client.put_manifest(
+            repository, image_tag, {"schemaVersion": 2}, media_type=OCI_MANIFEST_MEDIA_TYPE
+        )
+    assert digest == "sha256:ok"
+
+
+def test_put_manifest_falls_back_to_computed_digest_when_header_missing(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+    repository: str,
+    image_tag: str,
+) -> None:
+    manifest = {"schemaVersion": 2, "mediaType": OCI_MANIFEST_MEDIA_TYPE}
+    payload = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    httpx_mock.add_response(
+        method="PUT",
+        url=re.compile(rf"{registry_url}/v2/{repository}/manifests/{re.escape(image_tag)}"),
+        status_code=201,
+        # no Docker-Content-Digest header
+    )
+    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
+        digest = client.put_manifest(repository, image_tag, manifest, media_type=OCI_MANIFEST_MEDIA_TYPE)
+    assert digest == _digest(payload)
+
+
+def test_put_manifest_failure_raises(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+    repository: str,
+    image_tag: str,
+) -> None:
+    httpx_mock.add_response(
+        method="PUT",
+        url=re.compile(rf"{registry_url}/v2/{repository}/manifests/{re.escape(image_tag)}"),
         status_code=400,
         json={"errors": [{"code": "MANIFEST_INVALID", "message": "bad"}]},
     )
@@ -353,5 +264,55 @@ def test_push_manifest_failure_raises(
         RegistryClient(registry=registry_url, user="u", secret="s") as client,
         pytest.raises(RegistryError) as exc_info,
     ):
-        client.push_manifest(repository, {"schemaVersion": 2})
+        client.put_manifest(repository, image_tag, {"schemaVersion": 2}, media_type=OCI_MANIFEST_MEDIA_TYPE)
     assert exc_info.value.status_code == 400
+
+
+def test_session_cookie_from_fetch_not_replayed_on_put(
+    httpx_mock: pytest.FuncFixture,
+    registry_url: str,
+    repository: str,
+    image_tag: str,
+    image_manifest: dict,
+    image_manifest_digest: str,
+) -> None:
+    """Harbor issues a ``Set-Cookie: sid=...`` on the GET manifest fetch.
+
+    httpx persists cookies across requests by default; if that session cookie
+    is replayed on the follow-up ``PUT /v2/.../manifests/...``, Harbor's CSRF
+    middleware stops skipping ``/v2/`` (csrfSkipper keys off CarrySession) and
+    the PUT fails with HTTP 403 "CSRF token not found in request". The client
+    must discard Set-Cookie so every ``/v2/`` request stays sessionless.
+    """
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{registry_url}/v2/{repository}/manifests/{image_tag}",
+        status_code=200,
+        headers={
+            "Docker-Content-Digest": image_manifest_digest,
+            "Content-Type": OCI_MANIFEST_MEDIA_TYPE,
+            "Set-Cookie": "sid=abc-123; Path=/",
+        },
+        json=image_manifest,
+    )
+
+    cookie_seen: dict[str, str] = {}
+
+    def _assert_no_cookie(request: httpx.Request) -> httpx.Response:
+        cookie_seen["value"] = request.headers.get("cookie", "")
+        return httpx.Response(201, headers={"Docker-Content-Digest": "sha256:ok"})
+
+    httpx_mock.add_callback(
+        _assert_no_cookie,
+        method="PUT",
+        url=re.compile(rf"{registry_url}/v2/{repository}/manifests/{re.escape(image_tag)}"),
+    )
+
+    with RegistryClient(registry=registry_url, user="u", secret="s") as client:
+        client.fetch_manifest(repository, image_tag)
+        client.put_manifest(repository, image_tag, image_manifest, media_type=OCI_MANIFEST_MEDIA_TYPE)
+
+    assert cookie_seen.get("value", "") == "", (
+        f"session cookie replayed on PUT: {cookie_seen['value']!r} — "
+        "Harbor CSRF middleware would reject this request"
+    )

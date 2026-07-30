@@ -1,10 +1,17 @@
 """Pydantic models for the Cytario app-definition YAML.
 
-The shape mirrors the analysis-application definition the cytario-compute
-Catalog Adapter validates (SDS-CY-080200): schema version, parameter schema,
-declared input/output roles, and consumer/maintainer groups. The container image
-reference (`image`) is what the SDK attaches the definition to as an OCI
-Referrer.
+The shape mirrors the analysis-application definition the Cytario compute
+runtime validates: schema version, application identifier, display name,
+description, a reduced parameter schema, declared input/output data roles,
+and flat consumer/maintainer group lists. The container image reference
+(`image`) is what the SDK attaches the definition to as an OCI Image Format
+annotation on the image manifest.
+
+This model is the contract surface between the SDK (producer) and the
+Cytario runtime's ``AppDefinition`` (consumer). The
+``definition_document`` it emits MUST round-trip through the runtime's
+``validateAppDefinition`` without modification, so the field names and the
+reduced ``parameterSchema`` subset are pinned here and there in lockstep.
 """
 
 from __future__ import annotations
@@ -48,33 +55,94 @@ class ImageRef(BaseModel):
         return v
 
 
-class RoleBinding(BaseModel):
-    """A named input or output role with the media types it accepts/produces."""
+class ParameterField(BaseModel):
+    """A single parameter field — a reduced JSON-Schema-like subset.
+
+    Matches the Cytario runtime ``ParameterField``: a schema-driven form
+    renderer and a server-side validator both consume this subset without a
+    full JSON-Schema runtime. Full JSON-Schema is NOT used.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, description="Stable field key; unique within a definition.")
+    label: str = Field(..., min_length=1, description="Human-readable label rendered in the config form.")
+    type: str = Field(
+        ...,
+        description="Field type — drives the form widget and the server-side coercer.",
+    )
+    options: list[str] | None = Field(
+        default=None,
+        description="For `enum`: the selectable values. Ignored for other types.",
+    )
+    required: bool = Field(..., description="Whether the field must be supplied at run time.")
+    default: str | int | float | bool | None = Field(
+        default=None,
+        description="Default value when the field is omitted at run time.",
+    )
+    minimum: float | None = Field(default=None, description="Numeric lower bound (number/integer).")
+    maximum: float | None = Field(default=None, description="Numeric upper bound (number/integer).")
+    description: str | None = Field(default=None, description="Free-text help rendered under the field.")
+
+    @field_validator("type")
+    @classmethod
+    def _valid_type(cls, v: str) -> str:
+        allowed = {"string", "number", "integer", "boolean", "enum"}
+        if v not in allowed:
+            msg = f"type must be one of {sorted(allowed)}, got {v!r}"
+            raise ValueError(msg)
+        return v
+
+    @model_validator(mode="after")
+    def _enum_requires_options(self) -> ParameterField:
+        if self.type == "enum":
+            if not self.options:
+                msg = "enum field requires a non-empty `options` list"
+                raise ValueError(msg)
+            if any(not isinstance(o, str) for o in self.options):
+                msg = "enum `options` must all be strings"
+                raise ValueError(msg)
+        return self
+
+
+class DataRole(BaseModel):
+    """A declared input or output role of the analysis application.
+
+    A complete app-definition declares at least one input and one output
+    role. A role names
+    the kind of data the container accepts (input) or produces (output); the run
+    flow constrains the user's chosen input/output storage locations to the
+    org's connection prefixes. ``minCount``/``maxCount`` bound the object count
+    a role accepts (defaults: min 1, max 1; -1 = unbounded).
+
+    Note: this model intentionally does NOT carry MIME ``mediaTypes``. The
+    runtime ``DataRole`` does not model media-type constraints; media-type
+    validation, if required, is a run-flow concern
+    outside the app-definition contract.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, description="Role name, e.g. 'image' or 'segmentation'.")
-    media_types: list[str] = Field(
-        ...,
-        min_length=1,
-        alias="mediaTypes",
-        description="MIME media types the role accepts (input) or produces (output).",
+    kind: str = Field(..., description="Whether this is an input or output role.")
+    min_count: int | None = Field(
+        default=None,
+        alias="minCount",
+        description="Minimum object count this role accepts (default 1).",
+    )
+    max_count: int | None = Field(
+        default=None,
+        alias="maxCount",
+        description="Maximum object count this role accepts (default 1; -1 = unbounded).",
     )
 
-
-class GroupBindings(BaseModel):
-    """Keycloak group memberships that gate visibility of the app."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    consumers: list[str] = Field(
-        default_factory=list,
-        description="Groups whose members may see and run the app.",
-    )
-    maintainers: list[str] = Field(
-        default_factory=list,
-        description="Groups whose members may edit the app's saved configs.",
-    )
+    @field_validator("kind")
+    @classmethod
+    def _valid_kind(cls, v: str) -> str:
+        if v not in ("input", "output"):
+            msg = f"kind must be 'input' or 'output', got {v!r}"
+            raise ValueError(msg)
+        return v
 
 
 class AppDefinition(BaseModel):
@@ -87,50 +155,59 @@ class AppDefinition(BaseModel):
         alias="schemaVersion",
         description="App-definition schema version. Currently 1.",
     )
-    name: str = Field(
+    application_id: str = Field(
         ...,
+        alias="applicationId",
         min_length=1,
         max_length=128,
         description="Stable app identifier (lowercase, no whitespace).",
     )
-    display: str | None = Field(
-        default=None,
-        description="Human-readable display name. Defaults to `name`.",
+    name: str = Field(
+        ...,
+        min_length=1,
+        max_length=128,
+        description="Human-readable name shown in the picker.",
     )
-    description: str | None = Field(default=None, description="Short prose description.")
+    description: str = Field(..., description="Short prose description.")
     image: ImageRef
-    parameter_schema: dict[str, Any] = Field(
-        default_factory=dict,
+    parameter_schema: list[ParameterField] = Field(
+        default_factory=list,
         alias="parameterSchema",
         description=(
-            "JSON Schema (draft 2020-12) describing the run-configuration form. "
-            "Empty object means no parameters."
+            "Reduced parameter-schema subset (not full JSON-Schema) consumed by "
+            "the schema-driven config form and the server-side validator."
         ),
     )
-    input_roles: list[RoleBinding] = Field(
+    data_roles: list[DataRole] = Field(
         default_factory=list,
-        alias="inputRoles",
-        description="Input roles the app consumes (e.g. an image to analyze).",
+        alias="dataRoles",
+        description="Input/output data roles the app consumes/produces.",
     )
-    output_roles: list[RoleBinding] = Field(
+    consumer_groups: list[str] = Field(
         default_factory=list,
-        alias="outputRoles",
-        description="Output roles the app produces (e.g. a label mask).",
+        alias="consumerGroups",
+        description="Keycloak group display names whose members may see and run the app.",
     )
-    groups: GroupBindings = Field(default_factory=GroupBindings)
+    maintainer_groups: list[str] = Field(
+        default_factory=list,
+        alias="maintainerGroups",
+        description="Keycloak group display names whose members may edit the app's saved configs.",
+    )
 
-    @field_validator("name")
+    @field_validator("application_id")
     @classmethod
-    def _name_pattern(cls, v: str) -> str:
+    def _application_id_pattern(cls, v: str) -> str:
         if v != v.strip() or any(c.isspace() for c in v):
-            msg = f"name must not contain whitespace, got {v!r}"
+            msg = f"applicationId must not contain whitespace, got {v!r}"
             raise ValueError(msg)
         return v
 
     @model_validator(mode="after")
-    def _display_default(self) -> AppDefinition:
-        if self.display is None:
-            object.__setattr__(self, "display", self.name)
+    def _at_least_one_input_and_output(self) -> AppDefinition:
+        kinds = {r.kind for r in self.data_roles}
+        if self.data_roles and (not (kinds & {"input"}) or not (kinds & {"output"})):
+            msg = "dataRoles must declare at least one input and one output role"
+            raise ValueError(msg)
         return self
 
     @property
@@ -143,23 +220,26 @@ class AppDefinition(BaseModel):
         """The JSON document pushed as the artifact's layer blob.
 
         This is the catalog-discovery payload: a credential-free, PII-free
-        projection consumed by the Catalog Adapter (SDS-CY-080200).
+        projection consumed by the Cytario runtime at listing time. It round-
+        trips through the runtime's ``validateAppDefinition`` unchanged,
+        so the field names here MUST match the runtime's ``AppDefinition``.
+
+        ``versions`` is deliberately NOT emitted here — available versions are
+        discovered by the Cytario runtime from the image's tags/manifests at
+        listing time, not authored in the definition document.
         """
         return {
             "schemaVersion": self.schema_version,
+            "applicationId": self.application_id,
             "name": self.name,
-            "display": self.display,
             "description": self.description,
-            "image": {
-                "repository": self.image.repository,
-                **({"tag": self.image.tag} if self.image.tag else {}),
-                **({"digest": self.image.digest} if self.image.digest else {}),
-            },
-            "parameterSchema": self.parameter_schema,
-            "inputRoles": [r.model_dump(by_alias=True) for r in self.input_roles],
-            "outputRoles": [r.model_dump(by_alias=True) for r in self.output_roles],
-            "groups": self.groups.model_dump(),
+            "parameterSchema": [
+                f.model_dump(by_alias=True, exclude_none=True) for f in self.parameter_schema
+            ],
+            "dataRoles": [r.model_dump(by_alias=True, exclude_none=True) for r in self.data_roles],
+            "consumerGroups": list(self.consumer_groups),
+            "maintainerGroups": list(self.maintainer_groups),
         }
 
 
-__all__ = ["AppDefinition", "GroupBindings", "ImageRef", "RoleBinding"]
+__all__ = ["AppDefinition", "DataRole", "ImageRef", "ParameterField"]

@@ -1,8 +1,9 @@
-"""End-to-end CLI tests using typer.testing.CliRunner + respx mocks."""
+"""End-to-end CLI tests using typer.testing.CliRunner + httpx mocks."""
 
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -11,7 +12,7 @@ import httpx
 from typer.testing import CliRunner
 
 from cytario_app_sdk.cli import app
-from cytario_app_sdk.oci.manifest import EMPTY_CONFIG_DIGEST, OCI_MANIFEST_MEDIA_TYPE
+from cytario_app_sdk.oci.manifest import APPDEF_ANNOTATION_KEY, OCI_MANIFEST_MEDIA_TYPE
 
 if TYPE_CHECKING:
     import pytest
@@ -40,7 +41,7 @@ def test_register_dry_run_validates_yaml(
     assert result.exit_code == 0, result.stdout
     assert "registering app 'cellseg'" in result.stdout
     assert "DRY RUN" in result.stdout
-    assert "application/vnd.cytario.app-definition.v1+json" in result.stdout
+    assert APPDEF_ANNOTATION_KEY in result.stdout
 
 
 def test_register_dry_run_with_inline_credentials(
@@ -81,73 +82,46 @@ def test_register_end_to_end(
     )
     assert result.exit_code == 0, result.stdout
     assert "registered app 'cellseg'" in result.stdout
-    assert "referrer manifest sha256:" in result.stdout
+    assert "attached annotation" in result.stdout
+    assert "new manifest digest" in result.stdout
 
 
-def test_register_pushes_empty_config_blob_before_manifest(
+def test_register_attaches_appdef_annotation_to_pushed_manifest(
     httpx_mock: pytest.FuncFixture,
     example_app_yaml: Path,
     example_connection_yaml: Path,
     registry_url: str,
     repository: str,
     image_tag: str,
+    image_manifest: dict,
     image_manifest_digest: str,
-    image_manifest_size: int,
 ) -> None:
-    """Harbor rejects a manifest whose referenced blobs don't exist
-    (MANIFEST_BLOB_UNKNOWN, HTTP 400). The referrer manifest's `config` is the
-    OCI empty-config blob (sha256:e3b0c443..., size 0), which Harbor does not
-    treat as implicitly present — the SDK must push it before the manifest.
-    """
+    """The pushed manifest MUST carry the app-definition under the appdef
+    annotation key so the Cytario runtime's ``extractDefinition`` finds it."""
     httpx_mock.add_response(
-        method="HEAD",
+        method="GET",
         url=f"{registry_url}/v2/{repository}/manifests/{image_tag}",
         status_code=200,
         headers={
             "Docker-Content-Digest": image_manifest_digest,
-            "Content-Length": str(image_manifest_size),
             "Content-Type": OCI_MANIFEST_MEDIA_TYPE,
         },
+        json=image_manifest,
     )
 
-    pushed_digests: list[str] = []
-    push_order: list[str] = []
+    pushed_manifest: dict = {}
 
-    def _blob_cb(request: httpx.Request) -> httpx.Response:
-        digest = request.url.params.get("digest")
-        assert digest is not None, "blob upload POST missing digest query param"
-        pushed_digests.append(digest)
-        push_order.append(f"blob:{digest}")
+    def _capture_put(request: httpx.Request) -> httpx.Response:
+        pushed_manifest["body"] = json.loads(request.content)
         return httpx.Response(
             201,
-            headers={
-                "Location": f"{registry_url}/v2/{repository}/blobs/{digest}",
-                "Docker-Content-Digest": digest,
-            },
+            headers={"Docker-Content-Digest": _digest(request.content)},
         )
 
     httpx_mock.add_callback(
-        _blob_cb,
-        method="POST",
-        url=re.compile(re.escape(f"{registry_url}/v2/{repository}/blobs/uploads/") + r"(\?.*)?$"),
-        is_reusable=True,
-    )
-
-    def _manifest_cb(request: httpx.Request) -> httpx.Response:
-        push_order.append("manifest")
-        digest = _digest(request.content)
-        return httpx.Response(
-            201,
-            headers={
-                "Location": f"{registry_url}/v2/{repository}/manifests/{digest}",
-                "Docker-Content-Digest": digest,
-            },
-        )
-
-    httpx_mock.add_callback(
-        _manifest_cb,
+        _capture_put,
         method="PUT",
-        url=re.compile(rf"{registry_url}/v2/{repository}/manifests/sha256:[a-f0-9]+"),
+        url=re.compile(rf"{registry_url}/v2/{repository}/manifests/{re.escape(image_tag)}"),
     )
 
     result = RUNNER.invoke(
@@ -161,15 +135,62 @@ def test_register_pushes_empty_config_blob_before_manifest(
     )
     assert result.exit_code == 0, result.stdout
 
-    # The empty config blob must be pushed.
-    assert EMPTY_CONFIG_DIGEST in pushed_digests, (
-        f"empty config blob {EMPTY_CONFIG_DIGEST} was not pushed; pushed digests: {pushed_digests}"
+    body = pushed_manifest["body"]
+    assert APPDEF_ANNOTATION_KEY in body["annotations"]
+    annotation_value = body["annotations"][APPDEF_ANNOTATION_KEY]
+    definition = json.loads(annotation_value)
+    assert definition["applicationId"] == "cellseg"
+    assert definition["name"] == "Cell Segmentation"
+    # Existing annotations are preserved.
+    assert body["annotations"]["org.opencontainers.image.created"] == "2026-01-01T00:00:00Z"
+
+
+def test_register_preserves_original_manifest_media_type(
+    httpx_mock: pytest.FuncFixture,
+    example_app_yaml: Path,
+    example_connection_yaml: Path,
+    registry_url: str,
+    repository: str,
+    image_tag: str,
+    image_manifest: dict,
+    image_manifest_digest: str,
+) -> None:
+    """The PUT Content-Type must match the GET Content-Type so the registry
+    stores the annotated manifest as the same kind of manifest."""
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{registry_url}/v2/{repository}/manifests/{image_tag}",
+        status_code=200,
+        headers={
+            "Docker-Content-Digest": image_manifest_digest,
+            "Content-Type": "application/vnd.docker.distribution.manifest.v2+json",
+        },
+        json=image_manifest,
     )
-    # And it must be pushed BEFORE the manifest (Harbor checks blobs at
-    # manifest-push time, so pushing it after would still 400).
-    empty_blob_idx = push_order.index(f"blob:{EMPTY_CONFIG_DIGEST}")
-    manifest_idx = push_order.index("manifest")
-    assert empty_blob_idx < manifest_idx, f"empty config blob pushed after manifest: order={push_order}"
+
+    seen_content_type: dict[str, str] = {}
+
+    def _capture_put(request: httpx.Request) -> httpx.Response:
+        seen_content_type["value"] = request.headers.get("content-type", "")
+        return httpx.Response(201, headers={"Docker-Content-Digest": _digest(request.content)})
+
+    httpx_mock.add_callback(
+        _capture_put,
+        method="PUT",
+        url=re.compile(rf"{registry_url}/v2/{repository}/manifests/{re.escape(image_tag)}"),
+    )
+
+    result = RUNNER.invoke(
+        app,
+        [
+            "register",
+            str(example_app_yaml),
+            "--config",
+            str(example_connection_yaml),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert seen_content_type["value"] == "application/vnd.docker.distribution.manifest.v2+json"
 
 
 def test_register_missing_app_file(
@@ -195,7 +216,7 @@ def test_register_invalid_app_definition(
 ) -> None:
     bad = tmp_path / "bad.yaml"
     bad.write_text(
-        "name: cellseg\nimage: {repository: cytario/x}\n",  # missing tag AND digest
+        "applicationId: cellseg\nimage: {repository: cytario/x}\n",  # missing tag AND digest
         encoding="utf-8",
     )
     result = RUNNER.invoke(

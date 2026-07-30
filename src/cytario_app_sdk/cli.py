@@ -1,12 +1,13 @@
 """Typer CLI entry point.
 
 Commands:
-  register <app.yaml>   Attach an app-definition to a container image as an
-                        OCI Referrer (artifactType
-                        `application/vnd.cytario.app-definition.v1+json`).
+  register <app.yaml>   Attach an app-definition to a container image as an OCI
+                        Image Format annotation on the image manifest
+                        (``org.cytario.appdef.v1``). The manifest's new content
+                        digest pins both the image and the definition.
 
 Connection settings (registry, user, secret) can be passed on the command line
-or via a YAML config file consumed by typer-config's `--config` option.
+or via a YAML config file consumed by typer-config's ``--config`` option.
 
 Usage:
   cytario-app-sdk --config conn.yaml register app.yaml
@@ -27,8 +28,7 @@ from typer_config.decorators import use_yaml_config
 from cytario_app_sdk import __version__
 from cytario_app_sdk.errors import AppDefinitionError, AppSdkError, RegistryError
 from cytario_app_sdk.models import AppDefinition
-from cytario_app_sdk.oci import RegistryClient, build_app_definition_manifest
-from cytario_app_sdk.oci.manifest import EMPTY_CONFIG_BYTES
+from cytario_app_sdk.oci import APPDEF_ANNOTATION_KEY, RegistryClient, attach_definition_annotation
 
 app = typer.Typer(
     name="cytario-app-sdk",
@@ -71,8 +71,8 @@ def _connection_from(
 ) -> RegistryClient:
     """Build a RegistryClient from CLI flags (populated by typer-config from YAML).
 
-    `@use_yaml_config()` injects a `--config` option and, when provided,
-    populates `registry`/`user`/`secret` from the YAML before this runs.
+    ``@use_yaml_config()`` injects a ``--config`` option and, when provided,
+    populates ``registry``/``user``/``secret`` from the YAML before this runs.
     """
     if registry and user and secret:
         return RegistryClient(registry=registry, user=user, secret=secret)
@@ -109,10 +109,10 @@ def register(
     ] = None,
     dry_run: Annotated[
         bool,
-        typer.Option("--dry-run", help="Validate and print the planned manifest without pushing."),
+        typer.Option("--dry-run", help="Validate and print the planned annotation without pushing."),
     ] = False,
 ) -> None:
-    """Register an app-definition as an OCI Referrer on its container image."""
+    """Register an app-definition as an OCI Image Format annotation on its image manifest."""
     try:
         definition = _load_app_definition(app_yaml)
         image_ref = definition.image.tag or definition.image.digest
@@ -121,14 +121,15 @@ def register(
             raise AppDefinitionError(msg)
 
         typer.echo(
-            f"registering app {definition.name!r} on {definition.image.repository}@{image_ref}",
+            f"registering app {definition.application_id!r} on {definition.image.repository}@{image_ref}",
         )
 
         if dry_run:
             typer.echo(
-                "DRY RUN: would resolve subject, push definition blob, and push referrer manifest.",
+                "DRY RUN: would fetch the image manifest, attach the app-definition "
+                "annotation, and PUT it back by the image ref.",
             )
-            typer.echo(f"artifactType: {definition.artifact_type}")
+            typer.echo(f"annotation key: {APPDEF_ANNOTATION_KEY}")
             return
 
         client = _connection_from(
@@ -142,31 +143,19 @@ def register(
 
     with client:
         try:
-            subject = client.resolve_subject(definition.image.repository, image_ref)
+            manifest, media_type, _old_digest = client.fetch_manifest(definition.image.repository, image_ref)
             definition_doc = definition.definition_document
-            definition_bytes = json.dumps(definition_doc, sort_keys=True, separators=(",", ":")).encode(
-                "utf-8"
+            definition_json = json.dumps(definition_doc, sort_keys=True, separators=(",", ":"))
+            annotated = attach_definition_annotation(
+                manifest=manifest,
+                definition_json=definition_json,
             )
-            definition_descriptor = client.push_blob(definition.image.repository, definition_bytes)
-            # The layer's mediaType is the app-definition type, not octet-stream.
-            definition_descriptor = {**definition_descriptor, "mediaType": definition.artifact_type}
-            # Harbor validates that every blob referenced by the manifest
-            # exists in the registry before accepting the manifest push — a
-            # missing blob is rejected as MANIFEST_BLOB_UNKNOWN (HTTP 400).
-            # The manifest's `config` is the OCI empty-config blob
-            # (sha256:e3b0c442..., size 0); Harbor does not treat it as
-            # implicitly present the way the reference distribution server
-            # does, so push it explicitly. Re-pushes are a no-op (registries
-            # deduplicate by digest). EMPTY_CONFIG_BYTES is the same bytes
-            # the manifest module hashed to derive EMPTY_CONFIG_DIGEST, so the
-            # blob's digest always matches the manifest's `config.digest`.
-            client.push_blob(definition.image.repository, EMPTY_CONFIG_BYTES)
-            manifest = build_app_definition_manifest(
-                subject_descriptor=subject,
-                definition_blob_descriptor=definition_descriptor,
-                definition_media_type=definition.artifact_type,
+            new_digest = client.put_manifest(
+                definition.image.repository,
+                image_ref,
+                annotated,
+                media_type=media_type,
             )
-            manifest_digest = client.push_manifest(definition.image.repository, manifest)
         except RegistryError as exc:
             detail = f" (HTTP {exc.status_code})" if exc.status_code is not None else ""
             body = f"\n{exc.body}" if exc.body else ""
@@ -177,8 +166,9 @@ def register(
             raise typer.Exit(code=1) from exc
 
     typer.echo(
-        f"registered app {definition.name!r}: referrer manifest "
-        f"{manifest_digest} attached to {definition.image.repository}@{subject['digest']}",
+        f"registered app {definition.application_id!r}: attached annotation "
+        f"{APPDEF_ANNOTATION_KEY} to {definition.image.repository}@{image_ref} "
+        f"(new manifest digest {new_digest})",
     )
 
 
