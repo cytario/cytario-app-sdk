@@ -31,7 +31,7 @@ format` then `pytest` is the full verification loop.
 ## Conventions that differ from defaults
 
 - **Ruff `select = ["ALL"]`** with per-file ignores in `pyproject.toml`. The test ignores (S101 asserts, SLF001 private access, no docstrings/annotations, etc.) are intentional — do not "clean them up." Same for `PLR0913`/`TC003` ignores on `cli.py` and `client.py`.
-- **Pydantic models use `extra="forbid"` and camelCase aliases** (`schemaVersion`, `applicationId`, `parameterSchema`, `dataRoles`, `consumerGroups`, `maintainerGroups`). The app-definition YAML is camelCase. Add new fields with `alias=` or validation will reject them.
+- **Pydantic models use `extra="forbid"` and camelCase aliases** (`schemaVersion`, `applicationId`, `parameterSchema`, `dataRoles`). The app-definition YAML is camelCase. Add new fields with `alias=` or validation will reject them. Access-control fields (`consumerGroups`/`maintainerGroups`) are intentionally NOT modeled — entitlement is governed by the catalog connection's access scope on the Cytario side, not by the image; a YAML carrying them is rejected by `extra="forbid"`.
 - **`ImageRef.tag` and `ImageRef.digest` are mutually exclusive** (exactly one required), enforced by a model validator.
 - **Canonical JSON matters.** `oci/client.py:_canonical_json` and `cli.py` both serialize the definition document with `sort_keys=True, separators=(",", ":")` so the manifest digest is stable across runs. Change one, change the other.
 - **The appdef annotation key is the contract surface** with the Cytario runtime's `extractDefinition` (`org.cytario.appdef.v1`). Both sides must read/write the same key; changing it breaks discovery.

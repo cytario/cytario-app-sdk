@@ -11,15 +11,19 @@ v1.1 registry (e.g. Harbor 2.13+).
 
 Cytario's "app catalog" is our concept, not the registry's: an analysis
 application is a container image plus a metadata document (the *app-definition*)
-that declares the app's parameter schema, input/output data roles, and consumer
-/ maintainer groups. The SDK attaches the app-definition to the container image
-as an **OCI Image Format annotation** (`org.cytario.appdef.v1`) on the image
-manifest, then PUTs the manifest back under its original tag. Because the
-annotation is part of the manifest content, the manifest's immutable content
-digest binds the definition to the exact image — pinning the image by digest
-also pins the definition. The Cytario runtime fetches the manifest via
-`GET /v2/<name>/manifests/<ref>` and reads the definition from its annotations;
-no Harbor-specific API is used.
+that declares the app's parameter schema and input/output data roles. The SDK
+attaches the app-definition to the container image as an **OCI Image Format
+annotation** (`org.cytario.appdef.v1`) on the image manifest, then PUTs the
+manifest back under its original tag. Because the annotation is part of the
+manifest content, the manifest's immutable content digest binds the definition
+to the exact image — pinning the image by digest also pins the definition. The
+Cytario runtime fetches the manifest via `GET /v2/<name>/manifests/<ref>` and
+reads the definition from its annotations; no Harbor-specific API is used.
+
+Application access (who may see/run an app, who may edit its saved configs) is
+not part of the app-definition. Entitlement is governed by the catalog
+connection's access scope on the Cytario side, not by anything carried in the
+registry image.
 
 ## Install
 
@@ -91,11 +95,6 @@ outputRoles:
   - name: segmentation
     mediaTypes:
       - application/vnd.cytario.label-mask
-groups:
-  consumers:
-    - cellbio-team
-  maintainers:
-    - imaging-platform
 ```
 
 `register` fetches the container image manifest (by tag or digest), builds the

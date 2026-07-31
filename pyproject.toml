@@ -7,7 +7,7 @@ packages = ["src/cytario_app_sdk"]
 
 [project]
 name = "cytario-app-sdk"
-version = "0.1.0"
+version = "0.2.0"
 description = "CLI for registering Cytario analysis applications in an OCI Distribution v1.1 registry"
 readme = "README.md"
 requires-python = ">=3.10"

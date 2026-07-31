@@ -2,16 +2,21 @@
 
 The shape mirrors the analysis-application definition the Cytario compute
 runtime validates: schema version, application identifier, display name,
-description, a reduced parameter schema, declared input/output data roles,
-and flat consumer/maintainer group lists. The container image reference
-(`image`) is what the SDK attaches the definition to as an OCI Image Format
-annotation on the image manifest.
+description, a reduced parameter schema, and declared input/output data
+roles. The container image reference (`image`) is what the SDK attaches the
+definition to as an OCI Image Format annotation on the image manifest.
 
 This model is the contract surface between the SDK (producer) and the
 Cytario runtime's ``AppDefinition`` (consumer). The
 ``definition_document`` it emits MUST round-trip through the runtime's
 ``validateAppDefinition`` without modification, so the field names and the
 reduced ``parameterSchema`` subset are pinned here and there in lockstep.
+
+Application access (who may see/run an app, who may edit its saved configs)
+is NOT part of the app-definition. Entitlement is governed by the
+catalog connection's access scope on the Cytario side, not by anything
+carried in the registry image — so no access-control fields live on this
+model.
 """
 
 from __future__ import annotations
@@ -146,7 +151,13 @@ class DataRole(BaseModel):
 
 
 class AppDefinition(BaseModel):
-    """Top-level app-definition document loaded from the YAML."""
+    """Top-level app-definition document loaded from the YAML.
+
+    Carries the credential-free, PII-free metadata the Cytario runtime
+    consumes at catalog-discovery time. It deliberately does NOT carry
+    access-control fields — entitlement is governed by the catalog
+    connection's access scope on the Cytario side, not by the image.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -182,16 +193,6 @@ class AppDefinition(BaseModel):
         default_factory=list,
         alias="dataRoles",
         description="Input/output data roles the app consumes/produces.",
-    )
-    consumer_groups: list[str] = Field(
-        default_factory=list,
-        alias="consumerGroups",
-        description="Keycloak group display names whose members may see and run the app.",
-    )
-    maintainer_groups: list[str] = Field(
-        default_factory=list,
-        alias="maintainerGroups",
-        description="Keycloak group display names whose members may edit the app's saved configs.",
     )
 
     @field_validator("application_id")
@@ -237,8 +238,6 @@ class AppDefinition(BaseModel):
                 f.model_dump(by_alias=True, exclude_none=True) for f in self.parameter_schema
             ],
             "dataRoles": [r.model_dump(by_alias=True, exclude_none=True) for r in self.data_roles],
-            "consumerGroups": list(self.consumer_groups),
-            "maintainerGroups": list(self.maintainer_groups),
         }
 
 

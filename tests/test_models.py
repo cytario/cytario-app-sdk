@@ -27,8 +27,6 @@ def test_load_example_yaml(example_app_yaml: Path) -> None:
     assert app.data_roles[0].kind == "input"
     assert app.data_roles[1].name == "segmentation"
     assert app.data_roles[1].kind == "output"
-    assert app.consumer_groups == ["cellbio-team"]
-    assert app.maintainer_groups == ["imaging-platform"]
 
 
 def test_image_ref_requires_exactly_one_of_tag_or_digest() -> None:
@@ -83,6 +81,33 @@ def test_extra_fields_rejected() -> None:
         )
 
 
+def test_access_control_fields_rejected() -> None:
+    """Access-control fields no longer live on the app-definition — a YAML
+    that still carries them must be rejected so authors stop embedding
+    entitlement in the image. Entitlement is governed by the catalog
+    connection's access scope on the Cytario side."""
+    with pytest.raises(ValidationError, match="extra"):
+        AppDefinition.model_validate(
+            {
+                "applicationId": "cellseg",
+                "name": "Cell Seg",
+                "description": "x",
+                "image": {"repository": "cytario/x", "tag": "1.0.0"},
+                "consumerGroups": ["cellbio-team"],
+            },
+        )
+    with pytest.raises(ValidationError, match="extra"):
+        AppDefinition.model_validate(
+            {
+                "applicationId": "cellseg",
+                "name": "Cell Seg",
+                "description": "x",
+                "image": {"repository": "cytario/x", "tag": "1.0.0"},
+                "maintainerGroups": ["imaging-platform"],
+            },
+        )
+
+
 def test_data_roles_require_input_and_output() -> None:
     with pytest.raises(ValidationError, match="at least one input and one output"):
         AppDefinition.model_validate(
@@ -109,8 +134,11 @@ def test_definition_document_round_trips_runtime_schema(example_app_yaml: Path) 
     assert doc["parameterSchema"][0]["name"] == "diameter"
     assert doc["dataRoles"][0] == {"name": "image", "kind": "input"}
     assert doc["dataRoles"][1] == {"name": "segmentation", "kind": "output"}
-    assert doc["consumerGroups"] == ["cellbio-team"]
-    assert doc["maintainerGroups"] == ["imaging-platform"]
+    # Access-control fields are NOT projected into the discovery document —
+    # entitlement is governed by the catalog connection's access scope on
+    # the Cytario side, not by the image.
+    assert "consumerGroups" not in doc
+    assert "maintainerGroups" not in doc
     # versions is NOT emitted — discovered from image tags at listing time.
     assert "versions" not in doc
 

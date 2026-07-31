@@ -17,7 +17,3 @@ dataRoles:
     kind: input
   - name: segmentation
     kind: output
-consumerGroups:
-  - cellbio-team
-maintainerGroups:
-  - imaging-platform
