@@ -6,6 +6,11 @@ Commands:
                         (``org.cytario.appdef.v1``). The manifest's new content
                         digest pins both the image and the definition.
 
+  run -- <cmd...>       Wrapper-mode entrypoint for analysis containers: downloads
+                        inputs from S3, spawns the algorithm, uploads outputs.
+                        Reads CYTARIO_BROKER_*, CYTARIO_INPUT_URIS, CYTARIO_OUTPUT_URI
+                        from the environment (injected by the compute plugin).
+
 Connection settings (registry, user, secret) can be passed on the command line
 or via a YAML config file consumed by typer-config's ``--config`` option.
 
@@ -13,11 +18,14 @@ Usage:
   cytario-app-sdk --config conn.yaml register app.yaml
   cytario-app-sdk --registry https://harbor.example.com --user robot$cat \
       --secret <token> register app.yaml
+  cytario-app-sdk run -- python /app/process.py
 """
 
 from __future__ import annotations
 
 import json
+import os
+from datetime import timedelta
 from pathlib import Path
 from typing import Annotated
 
@@ -170,6 +178,111 @@ def register(
         f"{APPDEF_ANNOTATION_KEY} to {definition.image.repository}@{image_ref} "
         f"(new manifest digest {new_digest})",
     )
+
+
+# ---------------------------------------------------------------------------
+# run — wrapper-mode entrypoint for analysis containers
+# ---------------------------------------------------------------------------
+
+
+@app.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    add_help_option=True,
+)
+def run(
+    ctx: typer.Context,
+    input_dir: Annotated[
+        Path,
+        typer.Option("--input-dir", help="Local directory to download inputs into."),
+    ] = Path("/data/in"),
+    output_dir: Annotated[
+        Path,
+        typer.Option("--output-dir", help="Local directory to upload outputs from."),
+    ] = Path("/data/out"),
+    upload_on_failure: Annotated[
+        bool,
+        typer.Option("--upload-on-failure", help="Upload outputs even when the algorithm fails."),
+    ] = False,
+    pass_through_env: Annotated[
+        bool,
+        typer.Option(
+            "--pass-through-env",
+            help="Keep broker env vars in the subprocess (for hybrid algorithms).",
+        ),
+    ] = False,
+    refresh_margin: Annotated[
+        int,
+        typer.Option("--refresh-margin", help="Broker credential refresh margin in seconds."),
+    ] = 300,
+) -> None:
+    """Wrapper-mode entrypoint: download inputs, run <command>, upload outputs.
+
+    Reads CYTARIO_BROKER_ENDPOINT, CYTARIO_BROKER_TOKEN, AWS_BATCH_JOB_ID,
+    CYTARIO_INPUT_URIS (JSON array of s3:// URIs), and CYTARIO_OUTPUT_URI
+    (s3:// URI) from the environment. The algorithm command follows ``--``::
+
+        cytario-app-sdk run -- python /app/process.py
+    """
+    command = ctx.args
+    if not command:
+        typer.echo("error: no command specified after '--'", err=True)
+        raise typer.Exit(code=1)
+
+    # Lazy imports — boto3 is an optional dependency.
+    try:
+        from cytario_app_sdk.broker import BrokerClient, broker_boto3_session
+        from cytario_app_sdk.broker.exceptions import BrokerError
+        from cytario_app_sdk.runtime import run_job
+    except ImportError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    # Read broker config from env.
+    try:
+        broker = BrokerClient.from_env(refresh_margin=timedelta(seconds=refresh_margin))
+    except BrokerError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    # Read input/output URIs from env.
+    sources: list[str] = []
+    raw_inputs = os.environ.get("CYTARIO_INPUT_URIS", "").strip()
+    if raw_inputs:
+        try:
+            parsed = json.loads(raw_inputs)
+        except json.JSONDecodeError as exc:
+            typer.echo(f"error: CYTARIO_INPUT_URIS is not valid JSON: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        if not isinstance(parsed, list):
+            typer.echo("error: CYTARIO_INPUT_URIS must be a JSON array of s3:// URIs", err=True)
+            raise typer.Exit(code=1)
+        sources = [str(s) for s in parsed]
+
+    output_uri = os.environ.get("CYTARIO_OUTPUT_URI", "").strip() or None
+
+    # Build broker-backed boto3 session.
+    region = os.environ.get("AWS_DEFAULT_REGION") or os.environ.get("AWS_REGION")
+    try:
+        session = broker_boto3_session(broker, region_name=region)
+    except BrokerError as exc:
+        typer.echo(f"error: broker denied initial credential mint: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    except ImportError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    s3 = session.client("s3")
+    exit_code = run_job(
+        s3,
+        input_dir=input_dir,
+        output_dir=output_dir,
+        sources=sources,
+        output_uri=output_uri,
+        command=command,
+        upload_on_failure=upload_on_failure,
+        pass_through_env=pass_through_env,
+    )
+    raise typer.Exit(code=exit_code)
 
 
 if __name__ == "__main__":

@@ -55,6 +55,11 @@ Changelog = "https://github.com/cytario/cytario-app-sdk/releases"
 [project.scripts]
 cytario-app-sdk = "cytario_app_sdk.cli:app"
 
+[project.optional-dependencies]
+runtime = [
+    "boto3>=1.43.62",
+]
+
 [dependency-groups]
 dev = [
   "pytest>=8",
@@ -62,6 +67,7 @@ dev = [
   "respx>=0.21",
   "ruff>=0.6",
   "python-semantic-release>=10",
+  "moto>=5.2.2",
 ]
 
 # ---------------------------------------------------------------------------
@@ -118,6 +124,7 @@ ignore = [
   "S101",    # asserts are the point of a test suite
   "S105",    # "hardcoded password" strings are test fixtures
   "S106",    # same, as a function argument
+  "S107",    # same, as a function default arg
   "D",       # docstrings not required on every test function
   "ANN",     # type annotations not required in tests
   "ARG001",  # side-effecting fixtures are requested but not read
@@ -134,12 +141,44 @@ ignore = [
   "PLR0913", # Typer command signatures legitimately take many options
   "PLR0917", # same, positional count from Annotated defaults
   "TC003",   # `Path` is needed at runtime for typer's get_type_hints resolution
+  "PLC0415", # lazy imports gate the optional boto3 dependency in the `run` command
 ]
 
 "src/cytario_app_sdk/oci/client.py" = [
   "PLR2004", # HTTP status codes (200, 201, 202) are idiomatic literals
   "TRY003",  # long exception messages are fine for a CLI-facing client
   "EM102",   # f-strings in exception messages are fine here
+]
+
+"src/cytario_app_sdk/broker/client.py" = [
+  "PLR2004", # HTTP status codes (400, 401, 403) are idiomatic literals
+]
+
+"src/cytario_app_sdk/broker/exceptions.py" = [
+  "N818",   # GrantRevoked/GrantExpired/BrokerUnreachable read as states, not Error nouns
+]
+
+"src/cytario_app_sdk/broker/aws.py" = [
+  "PLC0415", # lazy imports gate the optional boto3 dependency
+  "SLF001",  # botocore_session._credentials is the de facto injection point
+  "TC001",   # BrokerClient/BrokerCredentials used at runtime under TYPE_CHECKING guard
+]
+
+"src/cytario_app_sdk/runtime/spawn.py" = [
+  "BLE001",  # broad except is intentional — surface any infra failure as exit 70
+  "PLR0913", # run_job legitimately takes many kwargs for the wrapper flow
+  "TRY400",  # logging.error with exc is fine; we don't want stack traces in container logs
+]
+
+"tests/runtime/*" = [
+  "S101",    # asserts are the point of a test suite
+  "BLE001",  # broad except in test helpers is fine
+]
+
+"tests/broker/*" = [
+  "DTZ001", # naive datetimes are intentional to test the UTC-assumption path
+  "PLC0415", # lazy imports inside test functions exercise the import-guard path
+  "SLF001",  # _refresh_using/_protected_refresh/_credentials are the test seams
 ]
 
 [tool.pytest.ini_options]
