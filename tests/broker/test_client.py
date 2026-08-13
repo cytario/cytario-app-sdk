@@ -43,14 +43,24 @@ def _mint_response(
     access_key_id: str = "ASIA",
     secret: str = "secret",
     session: str = "session",
+    refresh_token: str | None = None,
 ) -> dict[str, str]:
-    """Build the broker's JSON response body with a future expiration."""
-    return {
+    """Build the broker's JSON response body with a future expiration.
+
+    ``refresh_token`` simulates the broker's refresh-token rotation field
+    (C-391): when present, the client overwrites its in-memory grant token
+    with this value so the next mint presents the rotated token. Omit it to
+    simulate a realm with rotation off (backward-compatible response).
+    """
+    response: dict[str, str] = {
         "accessKeyId": access_key_id,
         "secretAccessKey": secret,
         "sessionToken": session,
         "expiration": (datetime.now(timezone.utc) + expires_in).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    if refresh_token is not None:
+        response["refreshToken"] = refresh_token
+    return response
 
 
 def test_credentials_mints_on_first_call(httpx_mock: pytest.FuncFixture) -> None:
@@ -354,3 +364,107 @@ def test_mint_posts_token_and_job_id_to_broker(
     request = httpx_mock.get_requests()[0]
     body = json.loads(request.content)
     assert body == {"token": TOKEN, "jobId": JOB_ID}
+
+
+def test_rotation_overwrites_in_memory_token_on_next_mint(
+    httpx_mock: pytest.FuncFixture,
+) -> None:
+    """A response carrying ``refreshToken`` rotates the in-memory grant token.
+
+    The first mint sends the original token (from the env config); the
+    broker responds with a rotated ``refreshToken``. The second mint must
+    send the rotated token, not the original — otherwise a realm with
+    rotation on rejects the replayed (now-revoked) original token.
+    """
+    rotated = "rotated-refresh-token"
+    httpx_mock.add_response(
+        method="POST",
+        url=BROKER_URL,
+        status_code=200,
+        json=_mint_response(access_key_id="ASIA-1", refresh_token=rotated),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=BROKER_URL,
+        status_code=200,
+        json=_mint_response(access_key_id="ASIA-2", refresh_token="rotated-2"),
+    )
+    client = BrokerClient(_config())
+    # Force two mints: the first cache is fresh (1h), so call refresh() to
+    # force the second mint and exercise the rotation.
+    client.credentials()
+    client.refresh()
+
+    requests = httpx_mock.get_requests()
+    assert len(requests) == 2
+    first_body = json.loads(requests[0].content)
+    second_body = json.loads(requests[1].content)
+    assert first_body["token"] == TOKEN
+    assert second_body["token"] == rotated
+    assert second_body["token"] != TOKEN
+
+
+def test_rotation_absent_keeps_original_token_backward_compat(
+    httpx_mock: pytest.FuncFixture,
+) -> None:
+    """A response without ``refreshToken`` keeps the original token working.
+
+    Backward compatible with a realm that has rotation off: the broker
+    response omits ``refreshToken`` and the client keeps using the original
+    grant token on every mint.
+    """
+    httpx_mock.add_response(
+        method="POST",
+        url=BROKER_URL,
+        status_code=200,
+        json=_mint_response(access_key_id="ASIA-1"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=BROKER_URL,
+        status_code=200,
+        json=_mint_response(access_key_id="ASIA-2"),
+    )
+    client = BrokerClient(_config())
+    client.credentials()
+    client.refresh()
+
+    requests = httpx_mock.get_requests()
+    assert len(requests) == 2
+    first_body = json.loads(requests[0].content)
+    second_body = json.loads(requests[1].content)
+    assert first_body["token"] == TOKEN
+    assert second_body["token"] == TOKEN
+
+
+def test_rotation_persisted_across_cached_credentials_calls(
+    httpx_mock: pytest.FuncFixture,
+) -> None:
+    """A rotated token survives a cached-credentials return (no second mint).
+
+    The rotation state lives on the client, not the cache: after the first
+    mint rotates the token, a cache hit returns the cached creds without a
+    new HTTP call, and the next forced mint still sends the rotated token.
+    """
+    rotated = "rotated-refresh-token"
+    httpx_mock.add_response(
+        method="POST",
+        url=BROKER_URL,
+        status_code=200,
+        json=_mint_response(access_key_id="ASIA-1", refresh_token=rotated),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=BROKER_URL,
+        status_code=200,
+        json=_mint_response(access_key_id="ASIA-2", refresh_token="rotated-2"),
+    )
+    client = BrokerClient(_config())
+    client.credentials()  # mints, rotates token to `rotated`
+    client.credentials()  # cache hit — no HTTP call, rotation state preserved
+    client.refresh()  # forces a mint — must send `rotated`
+
+    requests = httpx_mock.get_requests()
+    assert len(requests) == 2
+    forced_body = json.loads(requests[1].content)
+    assert forced_body["token"] == rotated

@@ -4,10 +4,12 @@ The Cytario compute plugin injects three environment variables into each
 running analysis container (SRS-CY-416101):
 
 - ``CYTARIO_BROKER_ENDPOINT`` — the full cytario-web origin URL of the broker
-  endpoint, e.g. ``https://app.example.com/api/plugin/broker``. A path-only
+  endpoint, e.g. ``https://app.example.com/api/broker``. A path-only
   value is unreachable from the container's network.
-- ``CYTARIO_BROKER_TOKEN`` — the job-scoped offline-capable grant token the
-  broker validates against the running-jobs ledger (SRS-CY-416102(c)).
+- ``CYTARIO_BROKER_TOKEN`` — the job-scoped offline-capable grant token (a
+  refresh token; the broker redeems it at the identity service on every
+  call, SRS-CY-416102(a)) the broker validates against the running-jobs
+  ledger (SRS-CY-416102(c)).
 - ``AWS_BATCH_JOB_ID`` — the provider job identifier, injected by AWS Batch
   itself; the broker correlates it with the token's job-binding claim.
 

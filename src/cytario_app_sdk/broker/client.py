@@ -19,11 +19,18 @@ both modes the SDK supports:
 The minted STS credentials are short-lived (≤ 1 hour; SRS-CY-416103). The
 grant token carried by :class:`BrokerClient` has a longer lifetime — the
 realm's maximum offline-session validity (SRS-CY-416104) — and is the
-authorization to *keep* minting. The client refreshes the STS credentials on
-demand, requesting a fresh mint from the broker whenever the cached
-credentials would expire within ``refresh_margin``. A job running longer
-than the realm max cannot refresh anymore; this is the spec's accepted,
-risk-assessed limitation.
+authorization to *keep* minting. The grant is a **refresh token**: the
+broker redeems it at the identity service on every call (SRS-CY-416102(a))
+to obtain a fresh, unexpired access token for STS, so a job whose startup
+outlives the access token's short ``exp`` still mints. When the realm
+enables refresh-token rotation, the broker returns the rotated refresh
+token and the client overwrites its in-memory token, so the next mint
+presents the current (rotated) token; a replayed (leaked) refresh token
+dies on the first legitimate refresh. The client refreshes the STS
+credentials on demand, requesting a fresh mint from the broker whenever
+the cached credentials would expire within ``refresh_margin``. A job
+running longer than the realm max cannot refresh anymore; this is the
+spec's accepted, risk-assessed limitation.
 """
 
 from __future__ import annotations
@@ -120,6 +127,13 @@ class BrokerClient:
 
         """
         self._config = config
+        # The grant token from the environment is a refresh token (C-391); the
+        # broker refreshes it on every call and returns a rotated refresh
+        # token. ``_refresh_token`` is the mutable rotation state — the
+        # frozen ``BrokerConfig.token`` is only the initial value. A restart
+        # mid-job loses this state, but an AWS Batch restart is a new job
+        # (new grant), so the original env-var token is also stale then.
+        self._refresh_token = config.token
         self._refresh_margin = refresh_margin
         self._http = http_client if http_client is not None else httpx.Client(timeout=httpx.Timeout(10.0))
         self._owns_http = http_client is None
@@ -212,7 +226,7 @@ class BrokerClient:
         if self._http.is_closed:
             msg = "broker client is closed (http client released)"
             raise BrokerUnreachable(msg)
-        body = {"token": self._config.token, "jobId": self._config.job_id}
+        body = {"token": self._refresh_token, "jobId": self._config.job_id}
         try:
             response = self._http.post(self._config.endpoint, json=body)
         except httpx.HTTPError as exc:
@@ -235,6 +249,14 @@ class BrokerClient:
         except ValueError as exc:
             msg = f"broker returned a non-JSON body: {response.text!r}"
             raise BrokerProtocolError(msg, status_code=response.status_code, body=response.text) from exc
+
+        # Refresh-token rotation (C-391): the broker returns the rotated
+        # refresh token so the next mint presents the current token. A
+        # response without ``refreshToken`` (rotation off at the realm)
+        # keeps the original token — backward compatible.
+        new_refresh_token = payload.get("refreshToken")
+        if isinstance(new_refresh_token, str) and new_refresh_token:
+            self._refresh_token = new_refresh_token
 
         try:
             creds = BrokerCredentials(
