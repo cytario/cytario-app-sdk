@@ -127,7 +127,7 @@ class BrokerClient:
 
         """
         self._config = config
-        # The grant token from the environment is a refresh token (C-391); the
+        # The grant token from the environment is a refresh token; the
         # broker refreshes it on every call and returns a rotated refresh
         # token. ``_refresh_token`` is the mutable rotation state — the
         # frozen ``BrokerConfig.token`` is only the initial value. A restart
@@ -250,7 +250,7 @@ class BrokerClient:
             msg = f"broker returned a non-JSON body: {response.text!r}"
             raise BrokerProtocolError(msg, status_code=response.status_code, body=response.text) from exc
 
-        # Refresh-token rotation (C-391): the broker returns the rotated
+        # Refresh-token rotation: the broker returns the rotated
         # refresh token so the next mint presents the current token. A
         # response without ``refreshToken`` (rotation off at the realm)
         # keeps the original token — backward compatible.

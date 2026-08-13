@@ -47,8 +47,8 @@ def _mint_response(
 ) -> dict[str, str]:
     """Build the broker's JSON response body with a future expiration.
 
-    ``refresh_token`` simulates the broker's refresh-token rotation field
-    (C-391): when present, the client overwrites its in-memory grant token
+    ``refresh_token`` simulates the broker's refresh-token rotation field:
+    when present, the client overwrites its in-memory grant token
     with this value so the next mint presents the rotated token. Omit it to
     simulate a realm with rotation off (backward-compatible response).
     """
