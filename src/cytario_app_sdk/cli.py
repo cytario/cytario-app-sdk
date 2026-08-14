@@ -37,6 +37,7 @@ from cytario_app_sdk import __version__
 from cytario_app_sdk.errors import AppDefinitionError, AppSdkError, RegistryError
 from cytario_app_sdk.models import AppDefinition
 from cytario_app_sdk.oci import APPDEF_ANNOTATION_KEY, RegistryClient, attach_definition_annotation
+from cytario_app_sdk.runtime.params import load_parameters_from_env, parameters_to_flags
 
 app = typer.Typer(
     name="cytario-app-sdk",
@@ -219,7 +220,10 @@ def run(
 
     Reads CYTARIO_BROKER_ENDPOINT, CYTARIO_BROKER_TOKEN, AWS_BATCH_JOB_ID,
     CYTARIO_INPUT_URIS (JSON array of s3:// URIs), and CYTARIO_OUTPUT_URI
-    (s3:// URI) from the environment. The algorithm command follows ``--``::
+    (s3:// URI) from the environment, and CYTARIO_PARAMETERS (JSON object of
+    user-validated application parameters) which it appends to the algorithm
+    command as ``--<name> <value>`` flags (SDS-CY-080302). The algorithm
+    command follows ``--``::
 
         cytario-app-sdk run -- python /app/process.py
     """
@@ -227,6 +231,13 @@ def run(
     if not command:
         typer.echo("error: no command specified after '--'", err=True)
         raise typer.Exit(code=1)
+
+    # Append user-validated application parameters (SDS-CY-080302) as --<name>
+    # <value> flags so a wrapper-mode algorithm exposes a plain CLI whose flag
+    # names match its app-definition. An empty/absent CYTARIO_PARAMETERS leaves
+    # the command unchanged (backward compatible with images predating it).
+    parameters = load_parameters_from_env()
+    command = [*command, *parameters_to_flags(parameters)]
 
     # Lazy imports — boto3 is an optional dependency.
     try:
