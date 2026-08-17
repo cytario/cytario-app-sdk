@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
 from pydantic import ValidationError
 
-from cytario_app_sdk.models import AppDefinition, DataRole, ImageRef, ParameterField
+from cytario_app_sdk.models import AppDefinition, DataRole, ImageRef, ParameterField, _parse_memory
 
 
 def test_load_example_yaml(example_app_yaml: Path) -> None:
@@ -172,3 +173,183 @@ def test_digest_image_ref_round_trips() -> None:
     )
     assert app.image.digest == "sha256:abc"
     assert app.image.tag is None
+
+
+# ---------------------------------------------------------------------------
+# resources block (SRS-CY-414108)
+# ---------------------------------------------------------------------------
+
+
+def _app_dict(**extra: Any) -> dict[str, Any]:
+    base = {
+        "applicationId": "cellseg",
+        "name": "Cell Seg",
+        "description": "x",
+        "image": {"repository": "cytario/x", "tag": "1.0.0"},
+        "dataRoles": [{"name": "image", "kind": "input"}, {"name": "out", "kind": "output"}],
+    }
+    base.update(extra)
+    return base
+
+
+def test_resources_block_optional() -> None:
+    app = AppDefinition.model_validate(_app_dict())
+    assert app.resources is None
+
+
+def test_resources_block_accepted(example_app_yaml: Path) -> None:
+    raw = yaml.safe_load(example_app_yaml.read_text(encoding="utf-8"))
+    app = AppDefinition.model_validate(raw)
+    assert app.resources is not None
+    req = app.resources.requests
+    assert req.cpu == "2000m"
+    assert req.memory == "8Gi"
+    assert req.memory_per_input_gb == "1Gi"
+    assert req.ephemeral_storage == "20Gi"
+    assert req.ephemeral_storage_per_input_gb == "2Gi"
+    assert req.gpu == 1
+
+
+def test_resources_defaults_when_partial() -> None:
+    app = AppDefinition.model_validate(
+        _app_dict(resources={"requests": {"memory": "4Gi"}}),
+    )
+    req = app.resources.requests
+    assert req.cpu == "1000m"
+    assert req.memory == "4Gi"
+    assert req.memory_per_input_gb == "0"
+    assert req.ephemeral_storage == "1Gi"
+    assert req.ephemeral_storage_per_input_gb == "0"
+    assert req.gpu == 0
+
+
+def test_resources_requires_memory() -> None:
+    with pytest.raises(ValidationError, match="memory"):
+        AppDefinition.model_validate(_app_dict(resources={"requests": {"cpu": "2000m"}}))
+
+
+def test_resources_rejects_missing_requests() -> None:
+    with pytest.raises(ValidationError, match="requests"):
+        AppDefinition.model_validate(_app_dict(resources={}))
+
+
+def test_resources_rejects_extra_field() -> None:
+    with pytest.raises(ValidationError, match="extra"):
+        AppDefinition.model_validate(
+            _app_dict(resources={"requests": {"memory": "4Gi", "limits": {}}}),
+        )
+
+
+def test_resources_rejects_non_binary_memory_suffix() -> None:
+    with pytest.raises(ValidationError, match="binary suffix"):
+        AppDefinition.model_validate(
+            _app_dict(resources={"requests": {"memory": "8G"}}),
+        )
+
+
+def test_resources_rejects_non_positive_memory_floor() -> None:
+    with pytest.raises(ValidationError, match="memory floor must be positive"):
+        AppDefinition.model_validate(
+            _app_dict(resources={"requests": {"memory": "0"}}),
+        )
+
+
+def test_resources_rejects_negative_per_input_factor() -> None:
+    with pytest.raises(ValidationError, match="binary suffix"):
+        AppDefinition.model_validate(
+            _app_dict(resources={"requests": {"memory": "4Gi", "memoryPerInputGb": "-1Gi"}}),
+        )
+
+
+def test_resources_rejects_non_integer_gpu() -> None:
+    with pytest.raises(ValidationError, match="gpu"):
+        AppDefinition.model_validate(
+            _app_dict(resources={"requests": {"memory": "4Gi", "gpu": 1.5}}),
+        )
+
+
+def test_resources_rejects_negative_gpu() -> None:
+    with pytest.raises(ValidationError, match="gpu"):
+        AppDefinition.model_validate(
+            _app_dict(resources={"requests": {"memory": "4Gi", "gpu": -1}}),
+        )
+
+
+def test_resources_rejects_invalid_cpu() -> None:
+    with pytest.raises(ValidationError, match="cpu quantity"):
+        AppDefinition.model_validate(
+            _app_dict(resources={"requests": {"memory": "4Gi", "cpu": "fast"}}),
+        )
+
+
+def test_resources_rejects_non_positive_cpu() -> None:
+    with pytest.raises(ValidationError, match="cpu must be positive"):
+        AppDefinition.model_validate(
+            _app_dict(resources={"requests": {"memory": "4Gi", "cpu": "0m"}}),
+        )
+
+
+def test_resources_accepts_bare_bytes_memory() -> None:
+    app = AppDefinition.model_validate(
+        _app_dict(resources={"requests": {"memory": "8589934592"}}),
+    )
+    assert app.resources.requests.memory == "8589934592"
+
+
+def test_resources_accepts_whole_core_cpu() -> None:
+    app = AppDefinition.model_validate(
+        _app_dict(resources={"requests": {"memory": "4Gi", "cpu": "2"}}),
+    )
+    assert app.resources.requests.cpu == "2"
+
+
+def test_resources_rejects_fractional_core_cpu() -> None:
+    with pytest.raises(ValidationError, match="cpu quantity"):
+        AppDefinition.model_validate(
+            _app_dict(resources={"requests": {"memory": "4Gi", "cpu": "0.5"}}),
+        )
+
+
+def test_resources_rejects_fractional_millicores() -> None:
+    with pytest.raises(ValidationError, match="cpu quantity"):
+        AppDefinition.model_validate(
+            _app_dict(resources={"requests": {"memory": "4Gi", "cpu": "2.5m"}}),
+        )
+
+
+@pytest.mark.parametrize(
+    ("suffix", "bytes_per"),
+    [
+        ("", 1),
+        ("Ki", 1024),
+        ("Mi", 1024**2),
+        ("Gi", 1024**3),
+        ("Ti", 1024**4),
+        ("Pi", 1024**5),
+        ("Ei", 1024**6),
+    ],
+)
+def test_memory_suffixes_parse(suffix: str, bytes_per: int) -> None:
+    assert _parse_memory(f"2{suffix}") == 2 * bytes_per
+
+
+def test_definition_document_projects_resources(example_app_yaml: Path) -> None:
+    raw = yaml.safe_load(example_app_yaml.read_text(encoding="utf-8"))
+    app = AppDefinition.model_validate(raw)
+    doc = app.definition_document
+    assert doc["resources"] == {
+        "requests": {
+            "cpu": "2000m",
+            "memory": "8Gi",
+            "memoryPerInputGb": "1Gi",
+            "ephemeralStorage": "20Gi",
+            "ephemeralStoragePerInputGb": "2Gi",
+            "gpu": 1,
+        }
+    }
+
+
+def test_definition_document_omits_resources_when_absent() -> None:
+    app = AppDefinition.model_validate(_app_dict())
+    doc = app.definition_document
+    assert doc["resources"] is None
