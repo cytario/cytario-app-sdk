@@ -17,3 +17,11 @@ dataRoles:
     kind: input
   - name: segmentation
     kind: output
+resources:
+  requests:
+    cpu: "2000m"
+    memory: "8Gi"
+    memoryPerInputGb: "1Gi"
+    ephemeralStorage: "20Gi"
+    ephemeralStoragePerInputGb: "2Gi"
+    gpu: 1

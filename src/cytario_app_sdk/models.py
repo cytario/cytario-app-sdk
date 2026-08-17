@@ -2,9 +2,10 @@
 
 The shape mirrors the analysis-application definition the Cytario compute
 runtime validates: schema version, application identifier, display name,
-description, a reduced parameter schema, and declared input/output data
-roles. The container image reference (`image`) is what the SDK attaches the
-definition to as an OCI Image Format annotation on the image manifest.
+description, a reduced parameter schema, declared input/output data roles, and
+an optional compute-resource floor. The container image reference (`image`) is
+what the SDK attaches the definition to as an OCI Image Format annotation on
+the image manifest.
 
 This model is the contract surface between the SDK (producer) and the
 Cytario runtime's ``AppDefinition`` (consumer). The
@@ -21,9 +22,65 @@ model.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+# Kubernetes-style resource quantities. Memory and ephemeral storage use binary
+# suffixes (Ki, Mi, Gi, Ti, Pi, Ei); a bare integer is bytes. CPU uses millicores
+# (``m`` suffix) or whole cores (integer). Fractional cores are rejected — the
+# author writes ``500m`` instead of ``0.5`` (SRS-CY-414108). The app-definition
+# carries only the floor (``requests``); the caller may raise it at run time,
+# capped by the provider maximum (SRS-CY-415110).
+_MEMORY_RE = re.compile(r"^[0-9]+(?:Ki|Mi|Gi|Ti|Pi|Ei)?$")
+_CPU_RE = re.compile(r"^[0-9]+m?$")
+_MEMORY_SUFFIXES: dict[str, int] = {
+    "": 1,
+    "Ki": 1024,
+    "Mi": 1024**2,
+    "Gi": 1024**3,
+    "Ti": 1024**4,
+    "Pi": 1024**5,
+    "Ei": 1024**6,
+}
+
+
+def _parse_memory(value: str) -> int:
+    """Parse a binary-suffixed memory quantity to bytes.
+
+    Raise ``ValueError`` on an unparseable value. Positivity of the floor
+    is enforced by the ``ResourceRequests`` model validator, not here.
+    """
+    if not _MEMORY_RE.match(value):
+        msg = (
+            f"resource quantity {value!r} must be an integer with a "
+            "binary suffix (Ki, Mi, Gi, Ti, Pi, Ei) or none"
+        )
+        raise ValueError(msg)
+    for suffix in ("Ei", "Pi", "Ti", "Gi", "Mi", "Ki", ""):
+        if value.endswith(suffix):
+            n = int(value[: -len(suffix)] if suffix else value)
+            return n * _MEMORY_SUFFIXES[suffix]
+    # Unreachable: the regex already gated the input.
+    msg = f"unparseable resource quantity {value!r}"
+    raise ValueError(msg)  # pragma: no cover
+
+
+def _parse_cpu(value: str) -> int:
+    """Parse a CPU quantity to millicores.
+
+    ``2000m`` → 2000; ``2`` → 2000. Raise ``ValueError`` on an unparseable
+    or non-positive value. Fractional cores (``0.5``) and fractional
+    millicores (``2.5m``) are rejected — the author writes ``500m`` or
+    ``250m`` instead (SRS-CY-414108).
+    """
+    if not _CPU_RE.match(value):
+        msg = f"cpu quantity {value!r} must be an integer core count or millicores (e.g. '2', '2000m')"
+        raise ValueError(msg)
+    if value.endswith("m"):
+        return int(value[:-1])
+    return int(value) * 1000
 
 
 class ImageRef(BaseModel):
@@ -150,6 +207,97 @@ class DataRole(BaseModel):
         return v
 
 
+class ResourceRequests(BaseModel):
+    """The compute-resource floor an application declares (SRS-CY-414108).
+
+    Carried under ``resources.requests`` in the app-definition YAML — the
+    Kubernetes ``ResourceRequirements`` shape, so the same definition is
+    expressible on AWS Batch (EC2/Fargate) and a Kubernetes Job binding
+    without per-provider fields (SDS §7.22). The block names no provider,
+    queue, instance type, or region; it carries only algorithm-level
+    resource needs.
+
+    Memory and ephemeral-storage quantities use binary suffixes (``Ki``,
+    ``Mi``, ``Gi``, ``Ti``, ``Pi``, ``Ei``); a bare integer is bytes. CPU
+    uses millicores (``m``) or whole cores (integer; fractional cores are
+    rejected — write ``500m`` instead of ``0.5``). GPU is an integer count
+    (zero or omitted = CPU-only). The runtime validates the block alongside
+    the rest of the definition; a missing ``memory`` floor, a non-positive
+    floor (``memory``/``ephemeralStorage``), a negative per-GiB increment,
+    or a non-integer GPU count causes the application to be treated as
+    unavailable (SRS-CY-414103).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    cpu: str = Field(
+        default="1000m",
+        description="Minimum CPU requested, in millicores ('2000m') or whole cores ('2').",
+    )
+    memory: str = Field(
+        ...,
+        description="Minimum memory floor, independent of input size (e.g. '8Gi', '8192Mi').",
+    )
+    memory_per_input_gb: str = Field(
+        default="0",
+        alias="memoryPerInputGb",
+        description="Memory added per GiB of input object size (e.g. '1Gi').",
+    )
+    ephemeral_storage: str = Field(
+        default="1Gi",
+        alias="ephemeralStorage",
+        description="Minimum ephemeral-storage (scratch) floor.",
+    )
+    ephemeral_storage_per_input_gb: str = Field(
+        default="0",
+        alias="ephemeralStoragePerInputGb",
+        description="Ephemeral storage added per GiB of input object size.",
+    )
+    gpu: int = Field(
+        default=0,
+        ge=0,
+        description="Number of GPUs required (zero or omitted = CPU-only).",
+    )
+
+    @field_validator("memory", "memory_per_input_gb", "ephemeral_storage", "ephemeral_storage_per_input_gb")
+    @classmethod
+    def _valid_memory_quantity(cls, v: str) -> str:
+        _parse_memory(v)  # raises on malformed
+        return v
+
+    @field_validator("cpu")
+    @classmethod
+    def _valid_cpu_quantity(cls, v: str) -> str:
+        _parse_cpu(v)  # raises on malformed
+        return v
+
+    @model_validator(mode="after")
+    def _floors_positive(self) -> ResourceRequests:
+        if _parse_memory(self.memory) <= 0:
+            msg = f"memory floor must be positive, got {self.memory!r}"
+            raise ValueError(msg)
+        if _parse_memory(self.ephemeral_storage) <= 0:
+            msg = f"ephemeralStorage floor must be positive, got {self.ephemeral_storage!r}"
+            raise ValueError(msg)
+        if _parse_cpu(self.cpu) <= 0:
+            msg = f"cpu must be positive, got {self.cpu!r}"
+            raise ValueError(msg)
+        return self
+
+
+class Resources(BaseModel):
+    """The optional ``resources`` block on an app-definition (SRS-CY-414108).
+
+    Carries the application's compute-resource floor under ``requests``. The
+    app declares no ``limits`` — the caller may raise the floor at run time,
+    capped by the provider maximum (SRS-CY-415110).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    requests: ResourceRequests
+
+
 class AppDefinition(BaseModel):
     """Top-level app-definition document loaded from the YAML.
 
@@ -193,6 +341,13 @@ class AppDefinition(BaseModel):
         default_factory=list,
         alias="dataRoles",
         description="Input/output data roles the app consumes/produces.",
+    )
+    resources: Resources | None = Field(
+        default=None,
+        description=(
+            "Optional compute-resource floor (SRS-CY-414108). Omitting the block "
+            "leaves the floor at the compute provider's default (SRS-CY-415110)."
+        ),
     )
 
     @field_validator("application_id")
@@ -238,7 +393,10 @@ class AppDefinition(BaseModel):
                 f.model_dump(by_alias=True, exclude_none=True) for f in self.parameter_schema
             ],
             "dataRoles": [r.model_dump(by_alias=True, exclude_none=True) for r in self.data_roles],
+            "resources": (
+                self.resources.model_dump(by_alias=True, exclude_none=True) if self.resources else None
+            ),
         }
 
 
-__all__ = ["AppDefinition", "DataRole", "ImageRef", "ParameterField"]
+__all__ = ["AppDefinition", "DataRole", "ImageRef", "ParameterField", "ResourceRequests", "Resources"]
