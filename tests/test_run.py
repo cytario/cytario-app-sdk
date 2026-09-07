@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 import cytario_app_sdk.broker as broker_mod
 import cytario_app_sdk.runtime as runtime_mod
 from cytario_app_sdk.cli import app
+from cytario_app_sdk.runtime.params import parameters_to_flags, resolve_file_parameters
 
 RUNNER = CliRunner()
 
@@ -42,7 +43,14 @@ def captured_command(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             return None
 
     def _stub_run_job(_s3: Any, **kwargs: Any) -> int:
-        captured["command"] = kwargs["command"]
+        # Mirror the real run_job: parameters are appended as flags after the
+        # (stubbed) download phase, with file parameters resolved to paths.
+        command = list(kwargs["command"])
+        parameters = kwargs.get("parameters") or {}
+        if parameters:
+            resolved = resolve_file_parameters(parameters, kwargs.get("sources") or [], [])
+            command += parameters_to_flags(resolved)
+        captured["command"] = command
         return 0
 
     # broker_boto3_session and run_job are lazy-imported from the runtime/broker
