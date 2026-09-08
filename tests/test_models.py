@@ -353,3 +353,57 @@ def test_definition_document_omits_resources_when_absent() -> None:
     app = AppDefinition.model_validate(_app_dict())
     doc = app.definition_document
     assert doc["resources"] is None
+
+
+class TestFileParameterField:
+    """C-478 (SRS-CY-414110): `type: file` parameter fields."""
+
+    def test_file_type_accepted(self) -> None:
+        field = ParameterField(name="pipelineConfig", label="Pipeline config", type="file", required=True)
+        assert field.type == "file"
+
+    def test_file_field_rejects_options(self) -> None:
+        with pytest.raises(ValidationError, match="file field must not carry `options`"):
+            ParameterField(
+                name="pipelineConfig", label="Pipeline config", type="file", required=True, options=["a"]
+            )
+
+    def test_file_field_rejects_minimum(self) -> None:
+        with pytest.raises(ValidationError, match="minimum`/`maximum"):
+            ParameterField(
+                name="pipelineConfig", label="Pipeline config", type="file", required=True, minimum=1
+            )
+
+    def test_file_field_rejects_maximum(self) -> None:
+        with pytest.raises(ValidationError, match="minimum`/`maximum"):
+            ParameterField(
+                name="pipelineConfig", label="Pipeline config", type="file", required=True, maximum=9
+            )
+
+    def test_file_field_rejects_default(self) -> None:
+        with pytest.raises(ValidationError, match="file field must not carry a `default`"):
+            ParameterField(
+                name="pipelineConfig", label="Pipeline config", type="file", required=True, default="x"
+            )
+
+    def test_file_field_serializes_into_definition_document(self) -> None:
+        """A file field round-trips through the annotation payload unchanged."""
+        app = AppDefinition(
+            schemaVersion=1,
+            applicationId="cellseg",
+            name="Cell Segmentation",
+            description="d",
+            image=ImageRef(repository="cytario/cellseg", tag="1.0.0"),
+            parameterSchema=[
+                {"name": "pipelineConfig", "label": "Pipeline config", "type": "file", "required": True},
+                {"name": "diameter", "label": "Diameter", "type": "number", "required": False, "default": 30},
+            ],
+            dataRoles=[{"name": "image", "kind": "input"}, {"name": "out", "kind": "output"}],
+        )
+        doc = app.definition_document
+        assert doc["parameterSchema"][0] == {
+            "name": "pipelineConfig",
+            "label": "Pipeline config",
+            "type": "file",
+            "required": True,
+        }

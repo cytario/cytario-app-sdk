@@ -149,7 +149,7 @@ class ParameterField(BaseModel):
     @field_validator("type")
     @classmethod
     def _valid_type(cls, v: str) -> str:
-        allowed = {"string", "number", "integer", "boolean", "enum"}
+        allowed = {"string", "number", "integer", "boolean", "enum", "file"}
         if v not in allowed:
             msg = f"type must be one of {sorted(allowed)}, got {v!r}"
             raise ValueError(msg)
@@ -163,6 +163,20 @@ class ParameterField(BaseModel):
                 raise ValueError(msg)
             if any(not isinstance(o, str) for o in self.options):
                 msg = "enum `options` must all be strings"
+                raise ValueError(msg)
+        # A `file` field designates one run-time configuration object
+        # (SRS-CY-414110): options, numeric bounds, and a default are all
+        # meaningless for it and make the definition invalid — the Cytario
+        # runtime's validator rejects the same shape.
+        if self.type == "file":
+            if self.options is not None:
+                msg = "file field must not carry `options`"
+                raise ValueError(msg)
+            if self.minimum is not None or self.maximum is not None:
+                msg = "file field must not carry `minimum`/`maximum`"
+                raise ValueError(msg)
+            if self.default is not None:
+                msg = "file field must not carry a `default`"
                 raise ValueError(msg)
         return self
 

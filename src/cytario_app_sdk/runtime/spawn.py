@@ -23,9 +23,10 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from cytario_app_sdk.broker.exceptions import BrokerError
+from cytario_app_sdk.runtime.params import parameters_to_flags, resolve_file_parameters
 from cytario_app_sdk.runtime.sync import download_inputs, upload_outputs
 
 if TYPE_CHECKING:
@@ -60,6 +61,7 @@ def run_job(
     upload_on_failure: bool = False,
     pass_through_env: bool = False,
     env: dict[str, str] | None = None,
+    parameters: dict[str, Any] | None = None,
 ) -> int:
     """Download inputs, spawn the algorithm, upload outputs.
 
@@ -79,6 +81,11 @@ def run_job(
             ``CYTARIO_BROKER_ENDPOINT``.
         env: The base environment for the subprocess. ``None`` inherits the
             parent process environment (after stripping). Explicit in tests.
+        parameters: The parsed ``CYTARIO_PARAMETERS`` object. When given,
+            ``file``-parameter values that match a downloaded input URI are
+            replaced by the downloaded local path before the algorithm is
+            spawned (C-478, SRS-CY-414110). ``None`` leaves the command
+            unchanged.
 
     Returns:
         The algorithm's exit code. A broker/infrastructure failure returns 70
@@ -87,6 +94,7 @@ def run_job(
 
     """
     # --- Download phase ----------------------------------------------------
+    written: list[Path] = []
     if sources:
         try:
             written = download_inputs(s3_client, sources, input_dir)
@@ -98,14 +106,31 @@ def run_job(
             _logger.error("input download failed: %s", exc)
             return 70
 
+    # --- Parameter resolution phase (C-478) ---------------------------------
+    # A `file`-type parameter arrives as an s3:// URI that also rides the
+    # input list; swap it for the downloaded local path before spawning so
+    # the algorithm receives --<name> <local path> (SRS-CY-414110).
+    effective_command = command
+    if parameters:
+        try:
+            resolved_params = resolve_file_parameters(parameters, sources or [], written)
+        except ValueError as exc:
+            _logger.error("file-parameter resolution failed: %s", exc)
+            return 70
+        if resolved_params != parameters:
+            _logger.info("resolved file parameters to local paths")
+        # --<name> <value> flags appended after resolution, so a `file`
+        # parameter reaches the algorithm as its local path (SDS-CY-080302).
+        effective_command = [*command, *parameters_to_flags(resolved_params)]
+
     # --- Spawn phase -------------------------------------------------------
     output_dir.mkdir(parents=True, exist_ok=True)
     sub_env = _build_subprocess_env(
         env if env is not None else dict(os.environ),
         pass_through_env=pass_through_env,
     )
-    _logger.info("spawning algorithm: %s", " ".join(command))
-    result = subprocess.run(command, env=sub_env, check=False)  # noqa: S603
+    _logger.info("spawning algorithm: %s", " ".join(effective_command))
+    result = subprocess.run(effective_command, env=sub_env, check=False)  # noqa: S603
     exit_code = result.returncode
     _logger.info("algorithm exited with code %d", exit_code)
 

@@ -274,3 +274,73 @@ class TestInfrastructureFailure:
         )
         # Algorithm's exit code (42) is preserved — the upload failure doesn't mask it.
         assert exit_code == 42
+
+
+# --- file-type parameters (C-478, SRS-CY-414110) -----------------------------
+
+
+class TestFileParameters:
+    def test_file_parameter_resolved_to_local_path(self, s3_client: boto3.client, tmp_path: object) -> None:
+        """A file param's s3:// URI is replaced by the downloaded local path."""
+        _put(s3_client, "src/image.tif", b"image-bytes")
+        _put(s3_client, "cfg/pipeline.yaml", b"config-bytes")
+        input_dir = tmp_path / "in"  # type: ignore[union-attr]
+        output_dir = tmp_path / "out"
+        output_dir.mkdir()  # type: ignore[union-attr]
+
+        config_uri = _s3_uri("cfg/pipeline.yaml")
+
+        # The algorithm asserts its --pipelineConfig flag is an existing
+        # local file containing the downloaded bytes.
+        algo = (
+            "import pathlib, sys; "
+            "args = sys.argv[1:]; "
+            "i = args.index('--pipelineConfig'); "
+            "p = pathlib.Path(args[i + 1]); "
+            "assert p.is_file(), f'missing {p}'; "
+            "assert p.read_bytes() == b'config-bytes', p.read_bytes()"
+        )
+        exit_code = run_job(
+            s3_client,
+            input_dir=input_dir,
+            output_dir=output_dir,
+            sources=[_s3_uri("src/"), config_uri],
+            output_uri=None,
+            command=[sys.executable, "-c", algo],
+            parameters={"pipelineConfig": config_uri, "threshold": 0.5},
+        )
+        assert exit_code == 0
+
+    def test_non_file_parameters_still_appended_after_download(
+        self, s3_client: boto3.client, tmp_path: object
+    ) -> None:
+        """Scalar/boolean params append as flags exactly as before (SDS-CY-080302)."""
+        algo = (
+            "import sys; "
+            "args = sys.argv[1:]; "
+            "assert '--normalize' in args; "
+            "assert args[args.index('--diameter') + 1] == '30'"
+        )
+        exit_code = run_job(
+            s3_client,
+            input_dir=tmp_path / "in",  # type: ignore[union-attr]
+            output_dir=tmp_path / "out",  # type: ignore[union-attr]
+            sources=[],
+            output_uri=None,
+            command=[sys.executable, "-c", algo],
+            parameters={"normalize": True, "diameter": 30},
+        )
+        assert exit_code == 0
+
+    def test_no_parameters_leaves_command_unchanged(self, s3_client: boto3.client, tmp_path: object) -> None:
+        """Backward compatibility: no CYTARIO_PARAMETERS → CMD defaults."""
+        exit_code = run_job(
+            s3_client,
+            input_dir=tmp_path / "in",  # type: ignore[union-attr]
+            output_dir=tmp_path / "out",  # type: ignore[union-attr]
+            sources=[],
+            output_uri=None,
+            command=[sys.executable, "-c", "import sys; sys.exit(0)"],
+            parameters=None,
+        )
+        assert exit_code == 0

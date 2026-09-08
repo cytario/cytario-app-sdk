@@ -37,7 +37,7 @@ from cytario_app_sdk import __version__
 from cytario_app_sdk.errors import AppDefinitionError, AppSdkError, RegistryError
 from cytario_app_sdk.models import AppDefinition
 from cytario_app_sdk.oci import APPDEF_ANNOTATION_KEY, RegistryClient, attach_definition_annotation
-from cytario_app_sdk.runtime.params import load_parameters_from_env, parameters_to_flags
+from cytario_app_sdk.runtime.params import load_parameters_from_env
 
 app = typer.Typer(
     name="cytario-app-sdk",
@@ -232,12 +232,12 @@ def run(
         typer.echo("error: no command specified after '--'", err=True)
         raise typer.Exit(code=1)
 
-    # Append user-validated application parameters (SDS-CY-080302) as --<name>
-    # <value> flags so a wrapper-mode algorithm exposes a plain CLI whose flag
-    # names match its app-definition. An empty/absent CYTARIO_PARAMETERS leaves
-    # the command unchanged (backward compatible with images predating it).
+    # Load user-validated application parameters (SDS-CY-080302) for
+    # run_job: it appends them as --<name> <value> flags AFTER the input
+    # download, so a `file`-type parameter's s3:// URI is first resolved to
+    # the downloaded local path (C-478, SRS-CY-414110). An empty/absent
+    # CYTARIO_PARAMETERS leaves the command unchanged.
     parameters = load_parameters_from_env()
-    command = [*command, *parameters_to_flags(parameters)]
 
     # Lazy imports — boto3 is an optional dependency.
     try:
@@ -288,6 +288,7 @@ def run(
         input_dir=input_dir,
         output_dir=output_dir,
         sources=sources,
+        parameters=parameters,
         output_uri=output_uri,
         command=command,
         upload_on_failure=upload_on_failure,
