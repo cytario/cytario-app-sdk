@@ -145,7 +145,7 @@ def test_refresh_forces_a_fresh_mint_even_when_cache_is_fresh(
 
 
 def test_grant_revoked_on_403(httpx_mock: pytest.FuncFixture) -> None:
-    """A 403 from the broker means the ledger row was removed (cancel/terminal)."""
+    """A 403 from the broker means the grant was revoked (cancel/terminal)."""
     httpx_mock.add_response(
         method="POST",
         url=BROKER_URL,
@@ -153,12 +153,15 @@ def test_grant_revoked_on_403(httpx_mock: pytest.FuncFixture) -> None:
         text="No active job binding for this token.",
     )
     client = BrokerClient(_config())
-    with pytest.raises(GrantRevoked, match="revoked"):
+    with pytest.raises(GrantRevoked, match="grant was revoked") as exc_info:
         client.credentials()
+    message = str(exc_info.value)
+    assert "job cancelled or reached terminal state" in message
+    assert "expired" not in message
 
 
 def test_grant_expired_on_401(httpx_mock: pytest.FuncFixture) -> None:
-    """A 401 from the broker means the grant is past the realm max offline-session validity."""
+    """A 401 from the broker means the grant session expired."""
     httpx_mock.add_response(
         method="POST",
         url=BROKER_URL,
@@ -166,8 +169,11 @@ def test_grant_expired_on_401(httpx_mock: pytest.FuncFixture) -> None:
         text="token expired",
     )
     client = BrokerClient(_config())
-    with pytest.raises(GrantExpired, match="expired"):
+    with pytest.raises(GrantExpired, match="grant session expired") as exc_info:
         client.credentials()
+    message = str(exc_info.value)
+    assert "re-run the job" in message
+    assert "revoked" not in message
 
 
 def test_protocol_error_on_5xx(httpx_mock: pytest.FuncFixture) -> None:

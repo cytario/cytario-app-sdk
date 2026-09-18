@@ -28,9 +28,12 @@ token and the client overwrites its in-memory token, so the next mint
 presents the current (rotated) token; a replayed (leaked) refresh token
 dies on the first legitimate refresh. The client refreshes the STS
 credentials on demand, requesting a fresh mint from the broker whenever
-the cached credentials would expire within ``refresh_margin``. A job
-running longer than the realm max cannot refresh anymore; this is the
-spec's accepted, risk-assessed limitation.
+the cached credentials would expire within ``refresh_margin``. The
+broker-side grant lifecycle keeps grants alive for the duration of a
+run; the realm's maximum offline-session validity (SRS-CY-416104) is
+the absolute upper bound on refresh, past which a mint fails with
+:class:`GrantExpired` (distinct from a revoked grant, which surfaces as
+:class:`GrantRevoked`).
 """
 
 from __future__ import annotations
@@ -169,10 +172,10 @@ class BrokerClient:
         has at least ``refresh_margin`` of remaining life; otherwise mints a
         fresh set. Raises:
 
-        - :class:`GrantRevoked` (broker 403) — the job's ledger row was
-          removed (cancel or terminal state).
-        - :class:`GrantExpired` (broker 401) — the grant is past the realm
-          max offline-session validity (SRS-CY-416104).
+        - :class:`GrantRevoked` (broker 403) — the job's grant was revoked
+          (job cancelled or reached terminal state).
+        - :class:`GrantExpired` (broker 401) — the grant session expired
+          before results could be uploaded; re-run the job.
         - :class:`BrokerUnreachable` — a network error prevented the call.
         - :class:`BrokerProtocolError` — 5xx or a malformed response body.
         """
@@ -234,10 +237,17 @@ class BrokerClient:
             raise BrokerUnreachable(msg) from exc
 
         if response.status_code == 403:
-            msg = "broker revoked the grant (job cancelled or reached terminal state)"
+            msg = (
+                "the job's grant was revoked (job cancelled or reached terminal state) "
+                "while other jobs of the batch may still run - contact support if "
+                "this job should still be running"
+            )
             raise GrantRevoked(msg)
         if response.status_code == 401:
-            msg = "grant token expired (past realm max offline-session validity)"
+            msg = (
+                "the job's grant session expired before results could be uploaded - "
+                "results were produced but could not be uploaded; re-run the job"
+            )
             raise GrantExpired(msg)
         if response.status_code >= 400:
             body_text = response.text
