@@ -43,12 +43,13 @@ class GrantRevoked(BrokerError):
 
 
 class GrantExpired(BrokerError):
-    """The grant token is past the realm's maximum offline-session validity.
+    """The grant session expired before results could be uploaded.
 
-    Returned as HTTP 401 — the offline grant has aged past the absolute upper
-    bound on refresh (SRS-CY-416104). The container cannot obtain fresh
-    credentials; further broker calls will keep failing. A long-running job
-    hitting this is the spec's accepted, risk-assessed limitation.
+    Returned as HTTP 401 — the grant session is dead (the realm's maximum
+    offline-session validity, SRS-CY-416104, is the absolute cap). Results
+    may have been produced but could not be uploaded; the job should be
+    re-run. Distinguished from :class:`GrantRevoked`, which means the job's
+    grant was explicitly revoked rather than aged out.
     """
 
 

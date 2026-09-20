@@ -89,9 +89,9 @@ def broker_boto3_session(
         ImportError: If ``boto3`` is not installed. Install the optional
             dependency with ``pip install cytario-app-sdk[runtime]``.
         GrantRevoked: The broker returned 403 on the initial mint — the job's
-            ledger row was removed (cancel or terminal state).
-        GrantExpired: The broker returned 401 — the grant is past the realm
-            max offline-session validity.
+            grant was revoked (job cancelled or reached terminal state).
+        GrantExpired: The broker returned 401 — the grant session expired
+            before results could be uploaded.
         BrokerUnreachable: A network error prevented the initial mint.
         BrokerProtocolError: The broker returned an unexpected response.
 

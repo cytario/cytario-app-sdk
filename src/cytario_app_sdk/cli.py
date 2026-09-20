@@ -276,7 +276,7 @@ def run(
     try:
         session = broker_boto3_session(broker, region_name=region)
     except BrokerError as exc:
-        typer.echo(f"error: broker denied initial credential mint: {exc}", err=True)
+        typer.echo(f"error: initial broker credential mint failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     except ImportError as exc:
         typer.echo(f"error: {exc}", err=True)
