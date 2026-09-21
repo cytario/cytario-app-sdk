@@ -239,7 +239,10 @@ class BrokerClient:
             msg = "broker revoked the grant (job cancelled or reached terminal state)"
             raise GrantRevoked(msg)
         if response.status_code == 401:
-            msg = "grant token expired (past realm max offline-session validity)"
+            msg = (
+                "the job session token was refused: the grant it resolves to "
+                "is past the realm max offline-session validity"
+            )
             raise GrantExpired(msg)
         if response.status_code >= 400:
             body_text = response.text

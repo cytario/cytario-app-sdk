@@ -21,6 +21,7 @@ import httpx
 import pytest
 
 from cytario_app_sdk.broker import (
+    JOB_ID_ENV_VAR,
     BrokerClient,
     BrokerConfig,
     BrokerConfigError,
@@ -30,9 +31,7 @@ from cytario_app_sdk.broker import (
     GrantExpired,
     GrantRevoked,
     config_from_env,
-    get_provider_binding,
 )
-from cytario_app_sdk.broker import env as env_module
 
 BROKER_URL = "https://app.example.com/api/plugin/broker"
 TOKEN = "job-scoped-grant-token"
@@ -171,7 +170,7 @@ def test_grant_expired_on_401(httpx_mock: pytest.FuncFixture) -> None:
         text="token expired",
     )
     client = BrokerClient(_config())
-    with pytest.raises(GrantExpired, match="expired"):
+    with pytest.raises(GrantExpired, match="offline-session validity"):
         client.credentials()
 
 
@@ -505,45 +504,9 @@ def test_config_from_env_lists_all_missing_variables_in_one_error() -> None:
     assert "AWS_BATCH_JOB_ID" not in message
 
 
-# --- provider-binding seam ---------------------------------------------------
+# --- provider job-id correlation --------------------------------------------
 
 
-def test_default_provider_binding_reads_aws_batch_job_id() -> None:
-    """The default (AWS) binding correlates on ``AWS_BATCH_JOB_ID``."""
-    binding = get_provider_binding()
-    assert binding.name == "aws"
-    assert binding.job_id_env_var == "AWS_BATCH_JOB_ID"
-
-
-def test_config_from_env_reads_binding_job_id_var(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``config_from_env`` reads the job-id variable named by the binding.
-
-    A future Kubernetes binding plugs in by adding one entry to
-    ``PROVIDER_BINDINGS`` — no client change. The test registers a
-    hypothetical binding at runtime rather than shipping a speculative
-    one in the SDK: the seam is the lookup, not the (unknown) variable
-    a real Kubernetes deployment would correlate on.
-    """
-    monkeypatch.setitem(env_module.PROVIDER_BINDINGS, "kubernetes", "KUBE_JOB_ID")
-    config = config_from_env(
-        environ={
-            "CYTARIO_BROKER_ENDPOINT": BROKER_URL,
-            "CYTARIO_BROKER_TOKEN": TOKEN,
-            "KUBE_JOB_ID": "pod-job-9",
-        },
-        provider="kubernetes",
-    )
-    assert config.job_id == "pod-job-9"
-    assert config.provider == "kubernetes"
-
-
-def test_unknown_provider_binding_is_rejected() -> None:
-    """Naming a provider the SDK does not know is a caller error, not a silent default."""
-    with pytest.raises(ValueError, match="unknown provider binding"):
-        config_from_env(
-            environ={
-                "CYTARIO_BROKER_ENDPOINT": BROKER_URL,
-                "CYTARIO_BROKER_TOKEN": TOKEN,
-            },
-            provider="gcp",
-        )
+def test_job_id_env_var_names_the_aws_batch_job_id() -> None:
+    """The one provider the SDK runs on names its job-id variable once, not inline."""
+    assert JOB_ID_ENV_VAR == "AWS_BATCH_JOB_ID"
