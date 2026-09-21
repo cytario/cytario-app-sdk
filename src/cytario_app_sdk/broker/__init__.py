@@ -9,7 +9,14 @@ from __future__ import annotations
 
 from cytario_app_sdk.broker.aws import broker_boto3_session
 from cytario_app_sdk.broker.client import BrokerClient, BrokerCredentials
-from cytario_app_sdk.broker.env import BrokerConfig, config_from_env
+from cytario_app_sdk.broker.env import (
+    DEFAULT_PROVIDER,
+    PROVIDER_BINDINGS,
+    BrokerConfig,
+    ProviderBinding,
+    config_from_env,
+    get_provider_binding,
+)
 from cytario_app_sdk.broker.exceptions import (
     BrokerConfigError,
     BrokerError,
@@ -20,6 +27,8 @@ from cytario_app_sdk.broker.exceptions import (
 )
 
 __all__ = [
+    "DEFAULT_PROVIDER",
+    "PROVIDER_BINDINGS",
     "BrokerClient",
     "BrokerConfig",
     "BrokerConfigError",
@@ -29,6 +38,8 @@ __all__ = [
     "BrokerUnreachable",
     "GrantExpired",
     "GrantRevoked",
+    "ProviderBinding",
     "broker_boto3_session",
     "config_from_env",
+    "get_provider_binding",
 ]

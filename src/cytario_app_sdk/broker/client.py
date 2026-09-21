@@ -2,9 +2,10 @@
 
 A running analysis container calls the broker endpoint to obtain short-lived
 STS storage credentials scoped to the submitting user's organization and the
-job's validated output prefix (SRS-CY-416103). The broker validates the
-job-scoped token against the running-jobs ledger (SRS-CY-416102(c)); a token
-whose ledger row has been removed mints nothing.
+job's validated output prefix (SRS-CY-416103). The broker resolves the
+presented token server-side against the running-jobs ledger
+(SRS-CY-416102(c), SDS-CY-080403); a token whose ledger row has been
+removed mints nothing.
 
 This client is the single call site for that HTTP exchange. It is shared by
 both modes the SDK supports:
@@ -17,23 +18,20 @@ both modes the SDK supports:
   algorithm's subprocess.
 
 The minted STS credentials are short-lived (≤ 1 hour; SRS-CY-416103). The
-grant token carried by :class:`BrokerClient` has a longer lifetime — the
-realm's maximum offline-session validity (SRS-CY-416104) — and is the
-authorization to *keep* minting. The grant is a **refresh token**: the
-broker redeems it at the identity service on every call (SRS-CY-416102(a))
-to obtain a fresh, unexpired access token for STS, so a job whose startup
-outlives the access token's short ``exp`` still mints. When the realm
-enables refresh-token rotation, the broker returns the rotated refresh
-token and the client overwrites its in-memory token, so the next mint
-presents the current (rotated) token; a replayed (leaked) refresh token
-dies on the first legitimate refresh. The client refreshes the STS
+token carried by :class:`BrokerClient` is a **per-job opaque session token**
+(SRS-CY-416110, SDS-CY-080403): bound at submission to exactly one job and
+its batch, revocable individually, and — unlike the batch-shared refresh
+token it replaces — carrying no claim, no scope, and no expiry of its own.
+It is not a JWT and is never parsed or decoded here; it is presented
+verbatim on every mint. Because it has no client-side lifetime, a
+long-running job keeps presenting the same token for every mint and the
+client holds no rotation state to lose: the grant's lifetime is a
+server-side concern (the batch's OAuth material lives in the host-owned
+credential record, never in the container). A ``refreshToken`` field in a
+response body is ignored — forward compatibility with an older host that
+still sends one during a rolling deploy. The client refreshes the STS
 credentials on demand, requesting a fresh mint from the broker whenever
-the cached credentials would expire within ``refresh_margin``. The
-broker-side grant lifecycle keeps grants alive for the duration of a
-run; the realm's maximum offline-session validity (SRS-CY-416104) is
-the absolute upper bound on refresh, past which a mint fails with
-:class:`GrantExpired` (distinct from a revoked grant, which surfaces as
-:class:`GrantRevoked`).
+the cached credentials would expire within ``refresh_margin``.
 """
 
 from __future__ import annotations
@@ -105,6 +103,9 @@ class BrokerClient:
     :meth:`credentials` call (or an explicit :meth:`refresh`) mints on
     demand. Use :meth:`from_env` to build one from the standard container
     environment variables.
+
+    The presented token is the per-job opaque session token from
+    :attr:`config` — immutable, never rotated client-side, never decoded.
     """
 
     def __init__(
@@ -117,7 +118,8 @@ class BrokerClient:
         """Construct a broker client.
 
         Args:
-            config: Resolved broker configuration (endpoint, token, job id).
+            config: Resolved broker configuration (endpoint, token, and the
+                optional informational job id).
             refresh_margin: Minimum remaining lifetime below which cached
                 credentials are considered stale and re-minted. Default 5 min
                 — comfortably under the 1-hour STS ceiling, so a boto3 call
@@ -130,13 +132,6 @@ class BrokerClient:
 
         """
         self._config = config
-        # The grant token from the environment is a refresh token; the
-        # broker refreshes it on every call and returns a rotated refresh
-        # token. ``_refresh_token`` is the mutable rotation state — the
-        # frozen ``BrokerConfig.token`` is only the initial value. A restart
-        # mid-job loses this state, but an AWS Batch restart is a new job
-        # (new grant), so the original env-var token is also stale then.
-        self._refresh_token = config.token
         self._refresh_margin = refresh_margin
         self._http = http_client if http_client is not None else httpx.Client(timeout=httpx.Timeout(10.0))
         self._owns_http = http_client is None
@@ -151,11 +146,11 @@ class BrokerClient:
         environ: dict[str, str] | None = None,
         http_client: httpx.Client | None = None,
     ) -> BrokerClient:
-        """Build a client from ``CYTARIO_BROKER_*`` and ``AWS_BATCH_JOB_ID``.
+        """Build a client from ``CYTARIO_BROKER_*`` (and the optional job-id variable).
 
         See :func:`cytario_app_sdk.broker.env.config_from_env` for the
         environment contract. Raises :class:`BrokerConfigError` on a missing
-        variable — a deployment defect, not a transient condition.
+        required variable — a deployment defect, not a transient condition.
         """
         config = config_from_env(environ=environ)
         return cls(config, refresh_margin=refresh_margin, http_client=http_client)
@@ -172,10 +167,10 @@ class BrokerClient:
         has at least ``refresh_margin`` of remaining life; otherwise mints a
         fresh set. Raises:
 
-        - :class:`GrantRevoked` (broker 403) — the job's grant was revoked
-          (job cancelled or reached terminal state).
-        - :class:`GrantExpired` (broker 401) — the grant session expired
-          before results could be uploaded; re-run the job.
+        - :class:`GrantRevoked` (broker 403) — the job's ledger row was
+          removed (cancel or terminal state).
+        - :class:`GrantExpired` (broker 401) — the grant is past the realm
+          max offline-session validity (SRS-CY-416104).
         - :class:`BrokerUnreachable` — a network error prevented the call.
         - :class:`BrokerProtocolError` — 5xx or a malformed response body.
         """
@@ -229,7 +224,11 @@ class BrokerClient:
         if self._http.is_closed:
             msg = "broker client is closed (http client released)"
             raise BrokerUnreachable(msg)
-        body = {"token": self._refresh_token, "jobId": self._config.job_id}
+        # The body carries the per-job session token only (SRS-CY-416110):
+        # no request field may influence which job a mint is scoped to —
+        # the broker resolves the token to its job server-side. The token is
+        # opaque (not a JWT) and is presented verbatim, never parsed.
+        body = {"token": self._config.token}
         try:
             response = self._http.post(self._config.endpoint, json=body)
         except httpx.HTTPError as exc:
@@ -237,17 +236,10 @@ class BrokerClient:
             raise BrokerUnreachable(msg) from exc
 
         if response.status_code == 403:
-            msg = (
-                "the job's grant was revoked (job cancelled or reached terminal state) "
-                "while other jobs of the batch may still run - contact support if "
-                "this job should still be running"
-            )
+            msg = "broker revoked the grant (job cancelled or reached terminal state)"
             raise GrantRevoked(msg)
         if response.status_code == 401:
-            msg = (
-                "the job's grant session expired before results could be uploaded - "
-                "results were produced but could not be uploaded; re-run the job"
-            )
+            msg = "grant token expired (past realm max offline-session validity)"
             raise GrantExpired(msg)
         if response.status_code >= 400:
             body_text = response.text
@@ -260,13 +252,9 @@ class BrokerClient:
             msg = f"broker returned a non-JSON body: {response.text!r}"
             raise BrokerProtocolError(msg, status_code=response.status_code, body=response.text) from exc
 
-        # Refresh-token rotation: the broker returns the rotated
-        # refresh token so the next mint presents the current token. A
-        # response without ``refreshToken`` (rotation off at the realm)
-        # keeps the original token — backward compatible.
-        new_refresh_token = payload.get("refreshToken")
-        if isinstance(new_refresh_token, str) and new_refresh_token:
-            self._refresh_token = new_refresh_token
+        # A ``refreshToken`` field (an older host still sending it during a
+        # rolling deploy) is deliberately ignored: the per-job session token
+        # never rotates client-side, so there is no state to update.
 
         try:
             creds = BrokerCredentials(
