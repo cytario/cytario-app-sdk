@@ -8,8 +8,9 @@ Commands:
 
   run -- <cmd...>       Wrapper-mode entrypoint for analysis containers: downloads
                         inputs from S3, spawns the algorithm, uploads outputs.
-                        Reads CYTARIO_BROKER_*, CYTARIO_INPUT_URIS, CYTARIO_OUTPUT_URI
-                        from the environment (injected by the compute plugin).
+                        Reads CYTARIO_BROKER_* (per-job session token),
+                        CYTARIO_INPUT_URIS, CYTARIO_OUTPUT_URI from the
+                        environment (injected by the compute plugin).
 
 Connection settings (registry, user, secret) can be passed on the command line
 or via a YAML config file consumed by typer-config's ``--config`` option.
@@ -218,12 +219,14 @@ def run(
 ) -> None:
     """Wrapper-mode entrypoint: download inputs, run <command>, upload outputs.
 
-    Reads CYTARIO_BROKER_ENDPOINT, CYTARIO_BROKER_TOKEN, AWS_BATCH_JOB_ID,
-    CYTARIO_INPUT_URIS (JSON array of s3:// URIs), and CYTARIO_OUTPUT_URI
-    (s3:// URI) from the environment, and CYTARIO_PARAMETERS (JSON object of
-    user-validated application parameters) which it appends to the algorithm
-    command as ``--<name> <value>`` flags (SDS-CY-080302). The algorithm
-    command follows ``--``::
+    Reads CYTARIO_BROKER_ENDPOINT and CYTARIO_BROKER_TOKEN (the per-job
+    opaque session token, SRS-CY-416110; its AWS Batch job id correlation
+    variable is optional), CYTARIO_INPUT_URIS (JSON array of s3:// URIs),
+    and CYTARIO_OUTPUT_URI (s3:// URI) from the environment, and
+    CYTARIO_PARAMETERS (JSON object of user-validated application
+    parameters) which it appends to the algorithm command as
+    ``--<name> <value>`` flags (SDS-CY-080302). The algorithm command
+    follows ``--``::
 
         cytario-app-sdk run -- python /app/process.py
     """

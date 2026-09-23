@@ -91,7 +91,8 @@ def broker_boto3_session(
         GrantRevoked: The broker returned 403 on the initial mint — the job's
             grant was revoked (job cancelled or reached terminal state).
         GrantExpired: The broker returned 401 — the grant session expired
-            before results could be uploaded.
+            before results could be uploaded (the per-job session token itself
+            carries no expiry; the bound grant's realm-max validity did).
         BrokerUnreachable: A network error prevented the initial mint.
         BrokerProtocolError: The broker returned an unexpected response.
 

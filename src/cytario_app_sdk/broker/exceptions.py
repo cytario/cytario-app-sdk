@@ -22,12 +22,11 @@ class BrokerError(AppSdkError):
 class BrokerConfigError(BrokerError):
     """Raised when required broker environment variables are missing or empty.
 
-    The container must receive ``CYTARIO_BROKER_ENDPOINT``,
-    ``CYTARIO_BROKER_TOKEN`` and ``AWS_BATCH_JOB_ID`` (the last is injected by
-    AWS Batch itself). A missing variable is a deployment / image-config
-    defect, not a transient condition — surfaced as a distinct error so a
-    wrapper entrypoint can fail fast with a clear message before the algorithm
-    starts.
+    The container must receive ``CYTARIO_BROKER_ENDPOINT`` and
+    ``CYTARIO_BROKER_TOKEN``. A missing variable is a deployment /
+    image-config defect, not a transient condition — surfaced as a distinct
+    error so a wrapper entrypoint can fail fast with a clear message before
+    the algorithm starts.
     """
 
 
@@ -35,21 +34,23 @@ class GrantRevoked(BrokerError):
     """The broker rejected the token because the job's ledger row was removed.
 
     Returned as HTTP 403 (SRS-CY-416102(c)) when the running-jobs ledger no
-    longer has a row for this ``jobId`` — either the user cancelled the job
-    (SRS-CY-37406) or the reconciler removed the row after a terminal state
+    longer has a row matching the presented per-job session token's hash
+    (SDS-CY-080403) — either the user cancelled the job (SRS-CY-37406) or
+    the reconciler removed the row after a terminal state
     (SRS-CY-416104/416106). Storage access has been withdrawn; the container
     should exit promptly, not retry.
     """
 
 
 class GrantExpired(BrokerError):
-    """The grant session expired before results could be uploaded.
+    """The presented token was refused with HTTP 401.
 
-    Returned as HTTP 401 — the grant session is dead (the realm's maximum
-    offline-session validity, SRS-CY-416104, is the absolute cap). Results
-    may have been produced but could not be uploaded; the job should be
-    re-run. Distinguished from :class:`GrantRevoked`, which means the job's
-    grant was explicitly revoked rather than aged out.
+    The per-job session token itself carries no expiry (SRS-CY-416110), but
+    the grant it resolves to server-side has the realm's maximum
+    offline-session validity as an absolute upper bound (SRS-CY-416104). The
+    container cannot obtain fresh credentials; further broker calls will
+    keep failing. A long-running job hitting this is the spec's accepted,
+    risk-assessed limitation.
     """
 
 

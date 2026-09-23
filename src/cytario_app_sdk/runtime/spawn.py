@@ -5,9 +5,10 @@ boots a broker-backed boto3 session, downloads the job's declared inputs to a
 local directory, spawns the algorithm as a subprocess, and uploads the
 algorithm's output directory back to S3 on success (or on failure with
 ``--upload-on-failure``). The subprocess inherits a cleaned environment — the
-broker token and endpoint are stripped by default so a broker-unaware
-algorithm cannot accidentally leak them; ``--pass-through-env`` keeps them for
-hybrid algorithms that import the SDK and call the broker themselves.
+per-job broker session token and endpoint are stripped by default so a
+broker-unaware algorithm cannot accidentally leak them;
+``--pass-through-env`` keeps them for hybrid algorithms that import the SDK
+and call the broker themselves.
 
 boto3's :class:`~botocore.credentials.RefreshableCredentials` (wired in
 :mod:`cytario_app_sdk.broker.aws`) refresh from the broker before every S3
@@ -39,9 +40,9 @@ __all__ = ["run_job"]
 _logger = logging.getLogger("cytario_app_sdk.runtime.spawn")
 
 #: Environment variables stripped from the subprocess env by default so a
-#: broker-unaware algorithm cannot accidentally leak the grant token. Kept
-#: only when ``pass_through_env=True`` is set (hybrid algorithms that import
-#: the SDK and call the broker themselves).
+#: broker-unaware algorithm cannot accidentally leak the per-job session
+#: token. Kept only when ``pass_through_env=True`` is set (hybrid algorithms
+#: that import the SDK and call the broker themselves).
 _STRIPPED_ENV_VARS = frozenset(
     {
         "CYTARIO_BROKER_TOKEN",

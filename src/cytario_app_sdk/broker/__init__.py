@@ -9,7 +9,11 @@ from __future__ import annotations
 
 from cytario_app_sdk.broker.aws import broker_boto3_session
 from cytario_app_sdk.broker.client import BrokerClient, BrokerCredentials
-from cytario_app_sdk.broker.env import BrokerConfig, config_from_env
+from cytario_app_sdk.broker.env import (
+    JOB_ID_ENV_VAR,
+    BrokerConfig,
+    config_from_env,
+)
 from cytario_app_sdk.broker.exceptions import (
     BrokerConfigError,
     BrokerError,
@@ -20,6 +24,7 @@ from cytario_app_sdk.broker.exceptions import (
 )
 
 __all__ = [
+    "JOB_ID_ENV_VAR",
     "BrokerClient",
     "BrokerConfig",
     "BrokerConfigError",
