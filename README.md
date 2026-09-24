@@ -114,7 +114,7 @@ receives these environment variables:
 |---|---|
 | `CYTARIO_BROKER_ENDPOINT` | Full URL of the credential-broker endpoint (e.g. `https://app.cytario.com/api/plugin/broker`). |
 | `CYTARIO_BROKER_TOKEN` | Job-scoped offline-capable grant token the broker validates against the running-jobs ledger. |
-| `CYTARIO_INPUT_URIS` | JSON array of `s3://bucket/key` URIs for the job's input files. |
+| `CYTARIO_INPUT_URIS` | JSON array of `s3://bucket/key` URIs for the job's inputs. A URI ending in `/` is a **folder** (every object under the prefix is downloaded); any other URI is a **single object**, even when its key is also a shared prefix. |
 | `CYTARIO_OUTPUT_URI` | `s3://bucket/key` URI (prefix) for the job's output. |
 | `AWS_BATCH_JOB_ID` | The provider job identifier (injected by AWS Batch). |
 
@@ -208,8 +208,13 @@ broker = BrokerClient.from_env()
 session = broker_boto3_session(broker)
 s3 = session.client("s3")
 
-# Download inputs declared in CYTARIO_INPUT_URIS
+# Download inputs declared in CYTARIO_INPUT_URIS. A source ending in `/` is a
+# folder (every object under the prefix); any other source is one object.
 download_inputs(s3, ["s3://bucket/inputs/"], Path("/data/in"))
+
+# When you need to know which local file came from which source URI:
+by_source = download_inputs_by_source(s3, ["s3://bucket/case/slide.czi"], Path("/data/in"))
+# {"s3://bucket/case/slide.czi": [PosixPath("/data/in/slide.czi")]}
 
 # Run your algorithm here...
 
