@@ -14,6 +14,7 @@ from moto import mock_aws
 
 from cytario_app_sdk.runtime import (
     download_inputs,
+    download_inputs_by_source,
     parse_s3_uri,
     upload_outputs,
 )
@@ -135,6 +136,112 @@ class TestDownloadInputs:
         dest = tmp_path  # type: ignore[assignment]
         written = download_inputs(s3_client, [f"s3://{BUCKET}/does-not-exist/"], dest)  # type: ignore[arg-type]
         assert written == []
+
+
+# --- C-622: an object key is not a folder prefix -----------------------------
+
+
+class TestObjectVersusFolderSource:
+    """C-622: a source without a trailing slash is one object, not a prefix.
+
+    The bug this covers: the downloader listed every source as a prefix, so a
+    file whose key is also a shared prefix (``case/slide.czi`` alongside
+    ``case/slide.czi/output/...``) pulled the whole tree into the container and
+    tripped file-parameter resolution downstream.
+    """
+
+    def test_object_source_does_not_expand_to_sibling_objects(
+        self, s3_client: boto3.client, tmp_path: object
+    ) -> None:
+        """A file key downloads exactly that object, never its sibling tree."""
+        # The same key exists both as an object and as a virtual directory
+        # (C-441): S3 keys are exact strings, so the two coexist.
+        _put(s3_client, "case/slide.czi", b"the-slide")
+        _put(s3_client, "case/slide.czi/output/log.txt", b"not-an-input")
+        _put(s3_client, "case/slide.czi/output/data.parquet", b"not-an-input")
+        dest = tmp_path  # type: ignore[assignment]
+        written = download_inputs(s3_client, [f"s3://{BUCKET}/case/slide.czi"], dest)  # type: ignore[arg-type]
+        assert len(written) == 1
+        assert written[0].name == "slide.czi"
+        assert written[0].read_bytes() == b"the-slide"
+        assert not (dest / "output").exists()  # type: ignore[union-attr]
+
+    def test_object_source_with_siblings_under_same_prefix(
+        self, s3_client: boto3.client, tmp_path: object
+    ) -> None:
+        """Companion objects sharing the file's prefix are not pulled in."""
+        _put(s3_client, "case/slide.ome.tif", b"wsi")
+        _put(s3_client, "case/slide.ome.tif.offsets.json", b"offsets")
+        _put(s3_client, "case/slide.ome.tif/channel-0.tif", b"channel")
+        dest = tmp_path  # type: ignore[assignment]
+        written = download_inputs(s3_client, [f"s3://{BUCKET}/case/slide.ome.tif"], dest)  # type: ignore[arg-type]
+        assert [p.name for p in written] == ["slide.ome.tif"]
+
+    def test_folder_source_still_downloads_recursively(
+        self, s3_client: boto3.client, tmp_path: object
+    ) -> None:
+        """The trailing slash still means folder — recursive download is kept."""
+        _put(s3_client, "case/slide.czi/output/log.txt", b"log")
+        _put(s3_client, "case/slide.czi/output/deep/data.parquet", b"data")
+        dest = tmp_path  # type: ignore[assignment]
+        written = download_inputs(s3_client, [f"s3://{BUCKET}/case/slide.czi/"], dest)  # type: ignore[arg-type]
+        names = {p.relative_to(dest).as_posix() for p in written}  # type: ignore[union-attr]
+        assert names == {"output/log.txt", "output/deep/data.parquet"}
+
+    def test_object_and_folder_sources_in_one_call(self, s3_client: boto3.client, tmp_path: object) -> None:
+        """Each source obeys its own trailing-slash signal, side by side."""
+        _put(s3_client, "a/slide.czi", b"img")
+        _put(s3_client, "a/slide.czi/extra/x.bin", b"x")
+        _put(s3_client, "b/parts/p1.tif", b"p1")
+        _put(s3_client, "b/parts/p2.tif", b"p2")
+        dest = tmp_path  # type: ignore[assignment]
+        written = download_inputs(
+            s3_client,
+            [f"s3://{BUCKET}/a/slide.czi", f"s3://{BUCKET}/b/parts/"],  # type: ignore[arg-type]
+            dest,
+        )
+        names = {p.relative_to(dest).as_posix() for p in written}  # type: ignore[union-attr]
+        assert names == {"slide.czi", "p1.tif", "p2.tif"}
+
+    def test_missing_object_source_raises(self, s3_client: boto3.client, tmp_path: object) -> None:
+        """A single-object source that does not exist fails loudly."""
+        dest = tmp_path  # type: ignore[assignment]
+        with pytest.raises(Exception, match=r"Not Found|404|NoSuchKey"):
+            download_inputs(s3_client, [f"s3://{BUCKET}/missing/slide.czi"], dest)  # type: ignore[arg-type]
+
+    def test_download_by_source_attributes_paths_to_their_uri(
+        self, s3_client: boto3.client, tmp_path: object
+    ) -> None:
+        """The by-source form keys each written path to its own source URI."""
+        _put(s3_client, "case/slide.czi", b"img")
+        _put(s3_client, "case/slide.czi/extra/x.bin", b"x")
+        _put(s3_client, "configs/model_config.yaml", b"cfg")
+        dest = tmp_path  # type: ignore[assignment]
+        image_uri = f"s3://{BUCKET}/case/slide.czi"
+        config_uri = f"s3://{BUCKET}/configs/model_config.yaml"
+        by_source = download_inputs_by_source(s3_client, [image_uri, config_uri], dest)
+        assert [p.name for p in by_source[image_uri]] == ["slide.czi"]
+        assert [p.name for p in by_source[config_uri]] == ["model_config.yaml"]
+
+    def test_download_by_source_expands_only_the_folder_uri(
+        self, s3_client: boto3.client, tmp_path: object
+    ) -> None:
+        """A folder source expands in the by-source mapping; an object does not."""
+        _put(s3_client, "parts/p1.tif", b"p1")
+        _put(s3_client, "parts/p2.tif", b"p2")
+        _put(s3_client, "single/x.tif", b"x")
+        _put(s3_client, "single/x.tif/companion.bin", b"c")
+        dest = tmp_path  # type: ignore[assignment]
+        folder_uri = f"s3://{BUCKET}/parts/"
+        object_uri = f"s3://{BUCKET}/single/x.tif"
+        by_source = download_inputs_by_source(s3_client, [folder_uri, object_uri], dest)
+        assert len(by_source[folder_uri]) == 2
+        assert len(by_source[object_uri]) == 1
+
+    def test_empty_sources_writes_nothing(self, s3_client: boto3.client, tmp_path: object) -> None:
+        """No sources → no entries, no files."""
+        dest = tmp_path  # type: ignore[assignment]
+        assert download_inputs_by_source(s3_client, [], dest) == {}
 
 
 # --- upload_outputs ----------------------------------------------------------

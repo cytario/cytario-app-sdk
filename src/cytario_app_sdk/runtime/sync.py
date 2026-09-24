@@ -1,9 +1,9 @@
 """S3 sync primitives for wrapper mode (download inputs / upload outputs).
 
 A thin boto3 layer over ``list_objects_v2`` + ``download_fileobj`` /
-``upload_fileobj``. Recursive, overwrite-always — matches the semantics of
-``aws s3 cp --recursive`` from the processing PoC. Streaming 8 MiB parts via
-boto3's threaded transfer manager; no ``aiobotocore`` dependency.
+``upload_fileobj``. Overwrite-always — matches the semantics of ``aws s3 cp``
+from the processing PoC. Streaming 8 MiB parts via boto3's threaded transfer
+manager; no ``aiobotocore`` dependency.
 
 The functions take a ``boto3.client("s3")`` (or any duck-typed S3 client)
 explicitly, so tests inject a moto-backed client and library-mode callers can
@@ -12,6 +12,21 @@ pass a session built from :func:`cytario_app_sdk.broker.broker_boto3_session`.
 Sources and destinations are full ``s3://bucket/key`` URIs (the plugin resolves
 ``RunPayload.input``/``output`` to these at submit time and injects
 ``CYTARIO_INPUT_URIS`` / ``CYTARIO_OUTPUT_URI`` into the container env).
+
+An input source denotes a **folder** or an **object** (C-622):
+
+* a source whose key ends with ``/`` (including a bare ``s3://bucket/``) is a
+  folder — every object under that prefix is downloaded, preserving the path
+  relative to the prefix, as before;
+* any other source is a **single object** — exactly that key is downloaded,
+  even when it also happens to be a prefix shared with sibling objects. S3 keys
+  are exact strings, so ``case/slide.ome.tif`` and ``case/slide.ome.tif/`` are
+  distinct; the storage picker returns a trailing slash for a folder selection
+  and an object key for a file selection, so the trailing slash is the signal
+  that discriminates them.
+
+Downloading an object needs only ``s3:GetObject``; listing (and therefore
+``s3:ListBucket``) is required for folders alone.
 """
 
 from __future__ import annotations
@@ -25,7 +40,7 @@ if TYPE_CHECKING:
 
     import boto3
 
-__all__ = ["S3Uri", "download_inputs", "upload_outputs"]
+__all__ = ["S3Uri", "download_inputs", "download_inputs_by_source", "upload_outputs"]
 
 
 @dataclass(frozen=True)
@@ -59,6 +74,17 @@ def parse_s3_uri(uri: str) -> S3Uri:
     return S3Uri(bucket=match["bucket"], key=match["key"])
 
 
+def _is_folder(uri: S3Uri) -> bool:
+    """Whether the source denotes a folder rather than a single object (C-622).
+
+    The trailing slash is the whole signal: S3 keys are exact strings, so
+    ``a/b.czi`` and ``a/b.czi/`` are different things, and the storage picker
+    emits the trailing slash only for a folder selection. A bare bucket URI has
+    an empty key and is a folder (the whole bucket).
+    """
+    return not uri.key or uri.key.endswith("/")
+
+
 def _list_objects(s3: boto3.client, uri: S3Uri) -> list[str]:
     """List all object keys under ``uri.key`` (prefix match, recursive)."""
     paginator = s3.get_paginator("list_objects_v2")
@@ -68,35 +94,71 @@ def _list_objects(s3: boto3.client, uri: S3Uri) -> list[str]:
     return keys
 
 
+def _download_uri(s3: boto3.client, uri: S3Uri, dest_dir: Path) -> list[Path]:
+    """Download one source URI into ``dest_dir`` and return the paths written.
+
+    A folder URI (trailing slash) lists its prefix and downloads every matching
+    object, preserving the path relative to that prefix. Any other URI is a
+    single object and downloads exactly that key — never its prefix expansion
+    (C-622) — into a file named after the key's basename.
+
+    A single-object source that does not exist raises the client's error (the
+    job fails loudly rather than handing the algorithm a missing input); a
+    folder source matching nothing writes nothing, as before. Existing local
+    files are overwritten (matches PoC semantics).
+    """
+    if not _is_folder(uri):
+        local_path = dest_dir / uri.key.rsplit("/", maxsplit=1)[-1]
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        with local_path.open("wb") as f:
+            s3.download_fileobj(uri.bucket, uri.key, f)
+        return [local_path]
+
+    written: list[Path] = []
+    for key in _list_objects(s3, uri):
+        local_path = dest_dir / _relative_key(key, uri.key)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        with local_path.open("wb") as f:
+            s3.download_fileobj(uri.bucket, key, f)
+        written.append(local_path)
+    return written
+
+
 def download_inputs(
     s3: boto3.client,
     sources: list[str],
     dest_dir: Path,
 ) -> list[Path]:
-    """Download each source URI (recursively) into ``dest_dir``.
+    """Download each source URI into ``dest_dir`` and return the paths written.
 
-    Each entry in ``sources`` is an ``s3://`` URI. A URI whose key points at a
-    "directory" (no specific object by that exact key) is listed recursively
-    and all matching objects are downloaded, preserving the path relative to
-    the URI's key prefix. A URI whose key points at a single object downloads
-    just that object.
+    Each entry in ``sources`` is an ``s3://`` URI; see the module docstring for
+    the folder/object distinction (C-622). Returns the flattened list of local
+    file paths written, in iteration order. Use
+    :func:`download_inputs_by_source` when the caller needs to attribute a
+    downloaded file back to the source URI it came from.
+    """
+    by_source = download_inputs_by_source(s3, sources, dest_dir)
+    return [path for paths in by_source.values() for path in paths]
 
-    Returns the list of local file paths written, in iteration order. Existing
-    local files are overwritten (matches PoC semantics).
+
+def download_inputs_by_source(
+    s3: boto3.client,
+    sources: list[str],
+    dest_dir: Path,
+) -> dict[str, list[Path]]:
+    """Download each source URI, keyed by the source URI that produced it.
+
+    Same download semantics as :func:`download_inputs`, but the return value
+    attributes every written path to its source URI. A folder source yields one
+    entry per object it expanded to; a single-object source yields exactly one
+    path. Insertion order follows ``sources``, so a caller can rely on the order
+    it passed. This is the shape file-parameter resolution needs: a parameter's
+    URI is looked up in this mapping rather than aligned positionally against a
+    flat list, which breaks as soon as one source expands to many objects
+    (C-622).
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
-    written: list[Path] = []
-    for uri_str in sources:
-        uri = parse_s3_uri(uri_str)
-        keys = _list_objects(s3, uri)
-        for key in keys:
-            rel = _relative_key(key, uri.key)
-            local_path = dest_dir / rel
-            local_path.parent.mkdir(parents=True, exist_ok=True)
-            with local_path.open("wb") as f:
-                s3.download_fileobj(uri.bucket, key, f)
-            written.append(local_path)
-    return written
+    return {uri_str: _download_uri(s3, parse_s3_uri(uri_str), dest_dir) for uri_str in sources}
 
 
 def upload_outputs(
