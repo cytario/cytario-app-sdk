@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-
-import pytest
+from pathlib import Path
 
 from cytario_app_sdk.runtime.params import (
     PARAMETERS_ENV_VAR,
@@ -125,10 +124,45 @@ class TestResolveFileParameters:
     def test_empty_parameters_returns_empty(self) -> None:
         assert resolve_file_parameters({}, [], []) == {}
 
-    def test_misaligned_lists_raise(self, tmp_path) -> None:
-        with pytest.raises(ValueError, match="do not align"):
-            resolve_file_parameters(
-                {"pipelineConfig": "s3://bucket/cfg.yaml"},
-                ["s3://bucket/cfg.yaml", "s3://bucket/other"],
-                [tmp_path / "in" / "cfg.yaml"],
-            )
+    def test_expanded_input_does_not_break_resolution(self, tmp_path) -> None:
+        """C-622: a folder input expanding beside a file parameter must not raise.
+
+        The old implementation asserted a 1:1 URI→path alignment and failed the
+        whole job with "input URIs (2) and downloaded paths (12) do not align"
+        as soon as the image input expanded to a tree of companion objects.
+        """
+        config = "s3://bucket/cfg.yaml"
+        image = "s3://bucket/cases/case1/image.czi"
+        resolved = resolve_file_parameters(
+            {"pipelineConfig": config, "depth16": True},
+            [image, config],
+            [Path(f"/in/part{i}.tif") for i in range(11)] + [tmp_path / "in" / "cfg.yaml"],
+        )
+        assert resolved["pipelineConfig"] == str(tmp_path / "in" / "cfg.yaml")
+        assert resolved["depth16"] is True
+
+    def test_no_file_parameter_with_expanded_input_is_untouched(self) -> None:
+        """Unrelated scalar/boolean params never gate resolution (C-622)."""
+        params = {"depth16": True, "object-format": "parquet"}
+        downloaded = [Path("/in/a"), Path("/in/b")]
+        assert resolve_file_parameters(params, ["s3://bucket/img.czi"], downloaded) == params
+
+    def test_by_source_mapping_resolves_exactly(self, tmp_path) -> None:
+        """The by-source form resolves a file param whatever its siblings did."""
+        config = "s3://bucket/cfg.yaml"
+        image = "s3://bucket/case/img.czi"
+        downloaded = {
+            image: [Path("/in/img.czi"), Path("/in/img.czi/output/log.txt")],
+            config: [tmp_path / "in" / "cfg.yaml"],
+        }
+        resolved = resolve_file_parameters({"pipelineConfig": config}, [image, config], downloaded)
+        assert resolved["pipelineConfig"] == str(tmp_path / "in" / "cfg.yaml")
+
+    def test_unresolvable_uri_left_unchanged(self) -> None:
+        """A value naming an object that was not downloaded is not rewritten."""
+        resolved = resolve_file_parameters(
+            {"note": "s3://bucket/not-downloaded.yaml"},
+            ["s3://bucket/img.czi"],
+            [Path("/in/img.czi")],
+        )
+        assert resolved["note"] == "s3://bucket/not-downloaded.yaml"

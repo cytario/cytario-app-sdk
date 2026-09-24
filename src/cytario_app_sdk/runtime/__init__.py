@@ -10,11 +10,18 @@ from __future__ import annotations
 
 from cytario_app_sdk.runtime.params import load_parameters_from_env, parameters_to_flags
 from cytario_app_sdk.runtime.spawn import run_job
-from cytario_app_sdk.runtime.sync import S3Uri, download_inputs, parse_s3_uri, upload_outputs
+from cytario_app_sdk.runtime.sync import (
+    S3Uri,
+    download_inputs,
+    download_inputs_by_source,
+    parse_s3_uri,
+    upload_outputs,
+)
 
 __all__ = [
     "S3Uri",
     "download_inputs",
+    "download_inputs_by_source",
     "load_parameters_from_env",
     "parameters_to_flags",
     "parse_s3_uri",
