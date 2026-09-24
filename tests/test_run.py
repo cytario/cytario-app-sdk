@@ -44,11 +44,14 @@ def captured_command(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     def _stub_run_job(_s3: Any, **kwargs: Any) -> int:
         # Mirror the real run_job: parameters are appended as flags after the
-        # (stubbed) download phase, with file parameters resolved to paths.
+        # (stubbed) download phase. No downloads happened here, so the by-source
+        # mapping is empty and a `file` parameter's URI is left as-is — which is
+        # exactly the flat-list behaviour the real run_job now also produces for
+        # a URI that was not downloaded (C-622 removed the alignment assertion).
         command = list(kwargs["command"])
         parameters = kwargs.get("parameters") or {}
         if parameters:
-            resolved = resolve_file_parameters(parameters, kwargs.get("sources") or [], [])
+            resolved = resolve_file_parameters(parameters, kwargs.get("sources") or [], {})
             command += parameters_to_flags(resolved)
         captured["command"] = command
         return 0

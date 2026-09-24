@@ -311,6 +311,82 @@ class TestFileParameters:
         )
         assert exit_code == 0
 
+    def test_file_parameter_resolves_when_image_key_is_a_shared_prefix(
+        self, s3_client: boto3.client, tmp_path: object
+    ) -> None:
+        """C-622 end-to-end: an object input plus a file param no longer fails.
+
+        The reported symptom: selecting ``.../test_img_crop.czi`` pulled the
+        whole ``test_img_crop.czi/output/`` tree into the container, and the
+        wrapper then aborted with "input URIs (2) and downloaded paths (12) do
+        not align". The image is an object, the config is a file parameter, and
+        the run must reach the algorithm with both as local paths.
+        """
+        _put(s3_client, "case/test_img_crop.czi", b"the-image")
+        for i in range(10):
+            _put(s3_client, f"case/test_img_crop.czi/output/part{i}.bin", b"junk")
+        _put(s3_client, "configs/model_config.yaml", b"cfg: 1")
+
+        input_dir = tmp_path / "in"  # type: ignore[union-attr]
+        output_dir = tmp_path / "out"  # type: ignore[union-attr]
+        output_dir.mkdir()  # type: ignore[union-attr]
+
+        image_uri = _s3_uri("case/test_img_crop.czi")
+        config_uri = _s3_uri("configs/model_config.yaml")
+
+        # The config parameter arrives as a local path flag; the image input
+        # is downloaded beside it, and its sibling tree must not have been
+        # pulled in.
+        algo = (
+            "import pathlib, sys; "
+            "args = sys.argv[1:]; "
+            f"in_dir = pathlib.Path(r'{input_dir}'); "
+            "cfg = pathlib.Path(args[args.index('--model-config') + 1]); "
+            "img = in_dir / 'test_img_crop.czi'; "
+            "assert img.is_file() and img.read_bytes() == b'the-image', img; "
+            "assert cfg.is_file() and cfg.read_bytes() == b'cfg: 1', cfg; "
+            "assert not (in_dir / 'output').exists(), 'sibling tree pulled in'"
+        )
+        exit_code = run_job(
+            s3_client,
+            input_dir=input_dir,
+            output_dir=output_dir,
+            sources=[image_uri, config_uri],
+            output_uri=None,
+            command=[sys.executable, "-c", algo],
+            parameters={"model-config": config_uri, "depth16": True},
+        )
+        assert exit_code == 0
+
+    def test_folder_input_beside_file_parameter(self, s3_client: boto3.client, tmp_path: object) -> None:
+        """A folder input expanding beside a file param resolves both paths."""
+        _put(s3_client, "parts/p1.tif", b"p1")
+        _put(s3_client, "parts/p2.tif", b"p2")
+        _put(s3_client, "configs/model_config.yaml", b"cfg: 1")
+        input_dir = tmp_path / "in"  # type: ignore[union-attr]
+        output_dir = tmp_path / "out"  # type: ignore[union-attr]
+        output_dir.mkdir()  # type: ignore[union-attr]
+
+        folder_uri = _s3_uri("parts/")
+        config_uri = _s3_uri("configs/model_config.yaml")
+        algo = (
+            "import pathlib, sys; "
+            "args = sys.argv[1:]; "
+            "cfg = pathlib.Path(args[args.index('--model-config') + 1]); "
+            "assert cfg.is_file() and cfg.read_bytes() == b'cfg: 1', cfg"
+        )
+        exit_code = run_job(
+            s3_client,
+            input_dir=input_dir,
+            output_dir=output_dir,
+            sources=[folder_uri, config_uri],
+            output_uri=None,
+            command=[sys.executable, "-c", algo],
+            parameters={"model-config": config_uri},
+        )
+        assert exit_code == 0
+        assert (input_dir / "p1.tif").is_file()  # type: ignore[union-attr]
+
     def test_non_file_parameters_still_appended_after_download(
         self, s3_client: boto3.client, tmp_path: object
     ) -> None:

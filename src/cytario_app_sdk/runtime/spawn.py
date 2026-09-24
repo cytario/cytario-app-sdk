@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 from cytario_app_sdk.broker.exceptions import BrokerError
 from cytario_app_sdk.runtime.params import parameters_to_flags, resolve_file_parameters
-from cytario_app_sdk.runtime.sync import download_inputs, upload_outputs
+from cytario_app_sdk.runtime.sync import download_inputs_by_source, upload_outputs
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -86,7 +86,9 @@ def run_job(
             ``file``-parameter values that match a downloaded input URI are
             replaced by the downloaded local path before the algorithm is
             spawned (C-478, SRS-CY-414110). ``None`` leaves the command
-            unchanged.
+            unchanged. Resolution is by the parameter's own URI, so an input
+            that expands to many files (a folder source) does not disturb it
+            (C-622).
 
     Returns:
         The algorithm's exit code. A broker/infrastructure failure returns 70
@@ -95,11 +97,18 @@ def run_job(
 
     """
     # --- Download phase ----------------------------------------------------
-    written: list[Path] = []
+    # Keyed by source URI, so a file parameter is resolved to the path its own
+    # URI was downloaded to rather than to a position in a flat list (C-622: a
+    # folder input expands to many objects, a file parameter to exactly one).
+    written: dict[str, list[Path]] = {}
     if sources:
         try:
-            written = download_inputs(s3_client, sources, input_dir)
-            _logger.info("downloaded %d file(s) to %s", len(written), input_dir)
+            written = download_inputs_by_source(s3_client, sources, input_dir)
+            _logger.info(
+                "downloaded %d file(s) to %s",
+                sum(len(paths) for paths in written.values()),
+                input_dir,
+            )
         except BrokerError as exc:
             _logger.error("broker denied input download: %s", exc)
             return 70
@@ -113,11 +122,7 @@ def run_job(
     # the algorithm receives --<name> <local path> (SRS-CY-414110).
     effective_command = command
     if parameters:
-        try:
-            resolved_params = resolve_file_parameters(parameters, sources or [], written)
-        except ValueError as exc:
-            _logger.error("file-parameter resolution failed: %s", exc)
-            return 70
+        resolved_params = resolve_file_parameters(parameters, sources or [], written)
         if resolved_params != parameters:
             _logger.info("resolved file parameters to local paths")
         # --<name> <value> flags appended after resolution, so a `file`

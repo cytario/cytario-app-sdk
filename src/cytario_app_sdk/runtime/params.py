@@ -20,7 +20,10 @@ Contract:
 * a ``file``-type parameter (C-478, SRS-CY-414110) arrives as an ``s3://``
   URI that also rides ``CYTARIO_INPUT_URIS``; :func:`resolve_file_parameters`
   replaces it with the downloaded object's local path before the flags are
-  built, so the algorithm receives ``--<name> <local path>``.
+  built, so the algorithm receives ``--<name> <local path>``. A parameter's
+  own URI selects its own downloaded path — there is no positional alignment
+  across the whole input list, which breaks as soon as a folder input expands
+  to many objects (C-622).
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -103,7 +107,7 @@ def load_parameters_from_env() -> dict[str, Any]:
 def resolve_file_parameters(
     parameters: dict[str, Any],
     input_uris: list[str],
-    downloaded: list[Path],
+    downloaded: list[Path] | Mapping[str, list[Path]],
 ) -> dict[str, Any]:
     """Replace ``file``-parameter ``s3://`` values with local paths (C-478).
 
@@ -117,24 +121,25 @@ def resolve_file_parameters(
     Args:
         parameters: The parsed ``CYTARIO_PARAMETERS`` object.
         input_uris: The source URIs passed to :func:`download_inputs`, in
-            order.
-        downloaded: The local paths written by :func:`download_inputs`, in
-            order (its return value).
+            order. Used to interpret the flat-list ``downloaded`` form; ignored
+            when ``downloaded`` is already a mapping.
+        downloaded: What :func:`download_inputs` wrote — either the source
+            URI → local paths mapping from
+            :func:`download_inputs_by_source` (exact for every source, whatever
+            it expanded to), or the flat list of paths it returns. A ``file``
+            parameter names exactly one object, so each parameter's own URI
+            selects its own path; nothing is derived from a global alignment of
+            the two collections, which breaks as soon as one source expands to
+            many objects (C-622).
 
     Returns:
         A new parameters mapping with every matched URI value replaced by the
-        downloaded object's local path.
-
-    Raises:
-        ValueError: the URIs and downloaded paths do not align — the file the
-            algorithm needs cannot be located, so the run must fail loudly
-            rather than pass a bogus ``s3://`` flag to the algorithm.
+        downloaded object's local path. A URI that was not downloaded is left
+        unchanged, so a string parameter that merely looks like a URI is never
+        rewritten.
 
     """
-    if len(input_uris) != len(downloaded):
-        msg = f"input URIs ({len(input_uris)}) and downloaded paths ({len(downloaded)}) do not align"
-        raise ValueError(msg)
-    uri_to_path = dict(zip(input_uris, downloaded, strict=True))
+    uri_to_path = _uri_to_local_path(input_uris, downloaded)
     resolved: dict[str, Any] = {}
     for name, value in parameters.items():
         if isinstance(value, str) and value in uri_to_path:
@@ -142,3 +147,31 @@ def resolve_file_parameters(
         else:
             resolved[name] = value
     return resolved
+
+
+def _uri_to_local_path(
+    input_uris: list[str],
+    downloaded: list[Path] | Mapping[str, list[Path]],
+) -> dict[str, Path]:
+    """Map a downloaded source URI to the local path it was written to.
+
+    The by-source mapping is exact whatever each source expanded to, so it is
+    preferred. Given only the flat path list, a source that downloaded exactly
+    one file maps to that file; a source that expanded to several objects
+    (C-622) is matched by the object's basename, since a file parameter names
+    one object and its downloaded file keeps that name.
+    """
+    if isinstance(downloaded, Mapping):
+        return {uri: paths[0] for uri, paths in downloaded.items() if len(paths) == 1}
+
+    mapping: dict[str, Path] = {}
+    if len(input_uris) == len(downloaded):
+        mapping.update(zip(input_uris, downloaded, strict=True))
+    by_name = {path.name: path for path in downloaded}
+    for uri in input_uris:
+        if uri in mapping:
+            continue
+        name = uri.rstrip("/").rsplit("/", maxsplit=1)[-1]
+        if name in by_name:
+            mapping[uri] = by_name[name]
+    return mapping
