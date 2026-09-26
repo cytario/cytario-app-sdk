@@ -126,3 +126,51 @@ jobs:
           echo "## Frozen Binary Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+
+  runtime-container:
+    name: Runtime container builds (no push)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Full docker build of freeze/Dockerfile.runtime with a fresh pip
+      # dependency resolution (no uv.lock) — exactly what the release-time
+      # runtime-image build does — followed by the same in-image smoke. This
+      # is what catches freeze breakage from unpinned dependency drift before
+      # merge (e.g. typer >= 0.27 no longer depending on click).
+      - name: Build runtime image (no push, load locally)
+        uses: docker/build-push-action@v7
+        with:
+          context: ./
+          file: freeze/Dockerfile.runtime
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: cytario-app-sdk-runtime:ci
+          cache-from: type=gha,scope=runtime-container
+          cache-to: type=gha,mode=max,scope=runtime-container
+
+      - name: Smoke test the frozen binary in the image
+        run: |
+          docker run --rm \
+            --entrypoint /opt/sdk/bin/cytario-app-sdk \
+            cytario-app-sdk-runtime:ci --help >/dev/null
+          docker run --rm \
+            --entrypoint /opt/sdk/bin/cytario-app-sdk \
+            -v "$PWD/examples/cellseg.yaml:/app-definition.yaml:ro" \
+            cytario-app-sdk-runtime:ci \
+            register --dry-run /app-definition.yaml >/dev/null
+
+      - name: Generate Summary
+        if: always()
+        run: |
+          echo "## Runtime Container Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
