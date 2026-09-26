@@ -218,9 +218,66 @@ def test_resources_defaults_when_partial() -> None:
     assert req.cpu == "1000m"
     assert req.memory == "4Gi"
     assert req.memory_per_input_gb == "0"
+    assert req.memory_per_megapixel is None
     assert req.ephemeral_storage == "1Gi"
     assert req.ephemeral_storage_per_input_gb == "0"
     assert req.gpu == 0
+
+
+def test_resources_accepts_memory_per_megapixel() -> None:
+    app = AppDefinition.model_validate(
+        _app_dict(
+            resources={"requests": {"memory": "7Gi", "memoryPerMegapixel": "256Ki"}},
+        ),
+    )
+    req = app.resources.requests
+    assert req.memory_per_megapixel == "256Ki"
+    # Both increments may be declared together — the runtime maximizes them.
+    assert req.memory_per_input_gb == "0"
+
+
+def test_resources_omits_memory_per_megapixel_from_the_document() -> None:
+    """An app that declares none must not push the field at all.
+
+    ``definition_document`` serializes with ``exclude_none`` (not
+    ``exclude_defaults``), so a defaulted string would leak into every
+    app's catalog payload. The runtime rejects a non-positive
+    ``memoryPerMegapixel``, so a leaked ``"0"`` would make every app that
+    omits the field unavailable.
+    """
+    app = AppDefinition.model_validate(
+        _app_dict(resources={"requests": {"memory": "4Gi"}}),
+    )
+    doc = app.definition_document
+    assert "memoryPerMegapixel" not in doc["resources"]["requests"]
+
+
+def test_resources_document_carries_memory_per_megapixel_when_declared() -> None:
+    app = AppDefinition.model_validate(
+        _app_dict(
+            resources={"requests": {"memory": "7Gi", "memoryPerMegapixel": "256Ki"}},
+        ),
+    )
+    doc = app.definition_document
+    assert doc["resources"]["requests"]["memoryPerMegapixel"] == "256Ki"
+
+
+def test_resources_rejects_zero_memory_per_megapixel() -> None:
+    with pytest.raises(ValidationError, match="memoryPerMegapixel must be positive"):
+        AppDefinition.model_validate(
+            _app_dict(
+                resources={"requests": {"memory": "4Gi", "memoryPerMegapixel": "0"}},
+            ),
+        )
+
+
+def test_resources_rejects_malformed_memory_per_megapixel() -> None:
+    with pytest.raises(ValidationError, match="binary suffix"):
+        AppDefinition.model_validate(
+            _app_dict(
+                resources={"requests": {"memory": "4Gi", "memoryPerMegapixel": "256K"}},
+            ),
+        )
 
 
 def test_resources_requires_memory() -> None:

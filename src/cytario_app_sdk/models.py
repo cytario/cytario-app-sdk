@@ -237,9 +237,19 @@ class ResourceRequests(BaseModel):
     rejected — write ``500m`` instead of ``0.5``). GPU is an integer count
     (zero or omitted = CPU-only). The runtime validates the block alongside
     the rest of the definition; a missing ``memory`` floor, a non-positive
-    floor (``memory``/``ephemeralStorage``), a negative per-GiB increment,
-    or a non-integer GPU count causes the application to be treated as
-    unavailable (SRS-CY-414103).
+    floor (``memory``/``ephemeralStorage``), a non-positive per-GiB or
+    per-megapixel increment, or a non-integer GPU count causes the
+    application to be treated as unavailable (SRS-CY-414103).
+
+    ``memoryPerMegapixel`` is an alternative memory increment keyed on the
+    input image's *channel-inclusive* megapixel count (``SizeX x SizeY x
+    SizeC`` — the total sample count across channels, not the spatial pixel
+    count). The two increments are maximized, never summed, so an
+    application may declare both and the larger estimate wins: the per-GiB
+    term rescues inputs whose byte size understates the workload, and the
+    per-megapixel term rescues those whose byte size overstates it (a
+    heavily compressed but large-geometry slide). Omitted = the term does
+    not participate.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -256,6 +266,16 @@ class ResourceRequests(BaseModel):
         default="0",
         alias="memoryPerInputGb",
         description="Memory added per GiB of input object size (e.g. '1Gi').",
+    )
+    memory_per_megapixel: str | None = Field(
+        default=None,
+        alias="memoryPerMegapixel",
+        description=(
+            "Memory added per channel-inclusive megapixel of the input image "
+            "(SizeX x SizeY x SizeC / 1e6), e.g. '256Ki'. Maximized with "
+            "memoryPerInputGb, never summed. Omitted = the term does not "
+            "participate."
+        ),
     )
     ephemeral_storage: str = Field(
         default="1Gi",
@@ -277,6 +297,17 @@ class ResourceRequests(BaseModel):
     @classmethod
     def _valid_memory_quantity(cls, v: str) -> str:
         _parse_memory(v)  # raises on malformed
+        return v
+
+    @field_validator("memory_per_megapixel")
+    @classmethod
+    def _valid_memory_per_megapixel(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        parsed = _parse_memory(v)  # raises on malformed
+        if parsed <= 0:
+            msg = f"memoryPerMegapixel must be positive, got {v!r}"
+            raise ValueError(msg)
         return v
 
     @field_validator("cpu")
