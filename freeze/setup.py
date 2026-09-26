@@ -54,7 +54,10 @@ setup(
             "includes": [
                 "cytario_app_sdk",
                 "typer",
-                "click",
+                # No "click": typer >= 0.27 vendors click as typer._click
+                # and no longer depends on the real package, so listing it
+                # breaks the freeze on a fresh dependency resolution. The
+                # finder discovers typer._click through typer either way.
                 "boto3",
                 "botocore",
                 "s3transfer",
