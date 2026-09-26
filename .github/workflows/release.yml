@@ -154,6 +154,4 @@ jobs:
     permissions:
       contents: read
       id-token: write # keyless cosign signing via GitHub OIDC
-    secrets:
-      HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
-      HARBOR_TOKEN: ${{ secrets.HARBOR_TOKEN }}
+    secrets: inherit
