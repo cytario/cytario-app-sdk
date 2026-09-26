@@ -168,11 +168,11 @@ boto3 + CA bundle baked in; needs only glibc >= 2.17). Layer it onto any
 distro image:
 
 ```dockerfile
-FROM booritas/slideio-debian-bin:2.8.1
+FROM <algorithm-image> # any glibc-based image, no Python needed
 COPY --from=harbor.cytario.org/apps-dev/cytario-app-sdk-runtime:4.0.0 \
      /opt/sdk/bin/cytario-app-sdk /usr/local/bin/cytario-app-sdk
 ENTRYPOINT ["/usr/local/bin/cytario-app-sdk", "run", "--"]
-CMD ["/opt/slideio/converter", "...", "--flags-matching-your-parameterSchema"]
+CMD ["<algorithm>", "...", "--flags-matching-your-parameterSchema"]
 ```
 
 Because the wrapper appends the app parameters as `--<name> <value>` flags to

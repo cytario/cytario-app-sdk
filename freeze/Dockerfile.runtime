@@ -5,11 +5,11 @@
 # CA bundle), glibc >= 2.17. An app image layers on top of its algorithm
 # image and COPYs the binary in:
 #
-#   FROM booritas/slideio-debian-bin:2.8.1
+#   FROM <algorithm-image>
 #   COPY --from=harbor.cytario.org/apps-dev/cytario-app-sdk-runtime:<ver> \
 #        /opt/sdk/bin/cytario-app-sdk /usr/local/bin/cytario-app-sdk
 #   ENTRYPOINT ["/usr/local/bin/cytario-app-sdk", "run", "--"]
-#   CMD ["<algorithm>", ...]
+#   CMD ["<algorithm>", "...", "--flags-matching-your-parameterSchema"]
 #
 # The binary needs no shared libraries beyond glibc, so any glibc-based
 # base image works. The build stage runs on ubuntu-24.04 to match the
