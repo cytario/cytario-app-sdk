@@ -162,14 +162,14 @@ algorithms that import the SDK and call the broker themselves).
 
 When the algorithm image has no Python, use the frozen wrapper binary instead
 of `pip install`: the `cytario-app-sdk-runtime` image (published at
-`harbor.cytario.org/apps-dev/cytario-app-sdk-runtime:<sdk-version>`) contains a
-self-contained `cytario-app-sdk` executable built with cx_Freeze (CPython +
-boto3 + CA bundle baked in; needs only glibc >= 2.17). Layer it onto any
-distro image:
+`harbor.cytario.org/oss/cytario-app-sdk-runtime:<sdk-version>`, on a distroless
+base) contains a self-contained `cytario-app-sdk` executable built with
+cx_Freeze (CPython + boto3 + CA bundle baked in; needs only glibc >= 2.17).
+Layer it onto any distro image:
 
 ```dockerfile
 FROM <algorithm-image> # any glibc-based image, no Python needed
-COPY --from=harbor.cytario.org/apps-dev/cytario-app-sdk-runtime:4.0.0 \
+COPY --from=harbor.cytario.org/oss/cytario-app-sdk-runtime:4.0.0 \
      /opt/sdk/bin/cytario-app-sdk /usr/local/bin/cytario-app-sdk
 ENTRYPOINT ["/usr/local/bin/cytario-app-sdk", "run", "--"]
 CMD ["<algorithm>", "...", "--flags-matching-your-parameterSchema"]

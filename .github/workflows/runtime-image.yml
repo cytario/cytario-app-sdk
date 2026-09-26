@@ -1,10 +1,14 @@
 name: Runtime image
 
 # Builds the frozen wrapper binary (freeze/setup.py, freeze/Dockerfile.runtime)
-# and publishes it as harbor.cytario.org/apps-dev/cytario-app-sdk-runtime:<ver>,
-# the base image non-Python apps COPY --from= to get wrapper mode. Runs on
-# the release tag push (after the semantic-release job has cut <ver>), so the
+# and publishes it as harbor.cytario.org/oss/cytario-app-sdk-runtime:<ver>, the
+# base image non-Python apps COPY --from= to get wrapper mode. Runs on the
+# release tag push (after the semantic-release job has cut <ver>), so the
 # image version always tracks the SDK version.
+#
+# The image is intentionally public-registry-compatible (oss project): it
+# contains only our own MIT-licensed code and its open-source dependencies,
+# no Cytario-internal material.
 
 on:
   push:
@@ -17,7 +21,7 @@ concurrency:
 
 env:
   REGISTRY_HARBOR: harbor.cytario.org
-  IMAGE_HARBOR: harbor.cytario.org/apps-dev/cytario-app-sdk-runtime
+  IMAGE_HARBOR: harbor.cytario.org/oss/cytario-app-sdk-runtime
 
 jobs:
   build-and-push:
@@ -58,10 +62,12 @@ jobs:
           cache-from: type=gha,scope=runtime-image
           cache-to: type=gha,mode=max,scope=runtime-image
 
-      # Smoke: the frozen binary boots, parses its CLI (typer/rich/pydantic
-      # all load), and validates an app-definition (models + YAML). The full
-      # run path (broker mint, download, spawn, upload) needs a live broker
-      # and is exercised by the app repos that consume this image.
+      # Smoke: the frozen binary boots on the distroless runtime and parses
+      # its CLI (typer/rich/pydantic all load). The dry-run register mounts
+      # the example app-definition from the checkout — the runtime image
+      # itself contains only /opt/sdk. The full run path (broker mint,
+      # download, spawn, upload) needs a live broker and is exercised by the
+      # app repos that consume this image.
       - name: Smoke test the frozen binary
         run: |
           docker run --rm \
@@ -69,8 +75,9 @@ jobs:
             "${IMAGE_HARBOR}@${{ steps.push.outputs.digest }}" --help >/dev/null
           docker run --rm \
             --entrypoint /opt/sdk/bin/cytario-app-sdk \
+            -v "$PWD/examples/cellseg.yaml:/app-definition.yaml:ro" \
             "${IMAGE_HARBOR}@${{ steps.push.outputs.digest }}" \
-            register --dry-run examples/cellseg.yaml >/dev/null
+            register --dry-run /app-definition.yaml >/dev/null
 
       - name: Install crane
         run: |
