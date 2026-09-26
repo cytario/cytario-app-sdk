@@ -227,13 +227,20 @@ def test_resources_defaults_when_partial() -> None:
 def test_resources_accepts_memory_per_megapixel() -> None:
     app = AppDefinition.model_validate(
         _app_dict(
-            resources={"requests": {"memory": "7Gi", "memoryPerMegapixel": "256Ki"}},
+            resources={
+                "requests": {
+                    "memory": "7Gi",
+                    "memoryPerInputGb": "1Gi",
+                    "memoryPerMegapixel": "256Ki",
+                },
+            },
         ),
     )
     req = app.resources.requests
     assert req.memory_per_megapixel == "256Ki"
-    # Both increments may be declared together — the runtime maximizes them.
-    assert req.memory_per_input_gb == "0"
+    # Both increments may be declared together — the runtime maximizes them,
+    # never sums them, so accepting both is part of the contract.
+    assert req.memory_per_input_gb == "1Gi"
 
 
 def test_resources_omits_memory_per_megapixel_from_the_document() -> None:
