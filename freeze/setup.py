@@ -14,25 +14,34 @@ runtime image (freeze/Dockerfile.runtime) at /opt/sdk/bin/cytario-app-sdk.
 
 from __future__ import annotations
 
-import sysconfig
+import sys
 from pathlib import Path
 
 from cx_Freeze import Executable, setup
 
 
 def _dist_info(name: str) -> Path:
-    """Locate a package's dist-info directory in the build venv.
+    """Locate a package's dist-info directory by scanning sys.path.
 
     typer-config reads its own version via importlib.metadata at import
     time, so the frozen app needs the dist-info present. cx_Freeze copies
     package code for ``includes`` but not distribution metadata; include it
     explicitly.
+
+    sys.path is scanned rather than sysconfig's purelib because the build
+    may run under an overlay venv (uv run --with cx_Freeze) whose
+    site-packages directory differs from where the project's dependencies
+    are installed — importlib.metadata itself resolves distributions by
+    walking sys.path, so this matches what the interpreter sees.
     """
-    site = Path(sysconfig.get_paths()["purelib"])
-    for pattern in (f"{name}*.dist-info", f"{name.replace('-', '_')}*.dist-info"):
-        if found := sorted(site.glob(pattern)):
-            return found[0]
-    msg = f"dist-info for {name} not found under {site}"
+    for entry in sys.path:
+        site = Path(entry)
+        if not site.is_dir():
+            continue
+        for pattern in (f"{name}*.dist-info", f"{name.replace('-', '_')}*.dist-info"):
+            if found := sorted(site.glob(pattern)):
+                return found[0]
+    msg = f"dist-info for {name} not found on sys.path"
     raise SystemExit(msg)
 
 
