@@ -41,4 +41,8 @@ RUN python3 freeze/setup.py build
 
 FROM final-base AS final
 
-COPY --from=freeze /src/build/exe.linux-x86_64-3.*/ /opt/sdk/
+# The build directory is the exe plus lib/ (and share/) with $ORIGIN-relative
+# rpaths, so the whole tree is copied preserving its internal layout. The
+# copy target puts the binary at /opt/sdk/bin/cytario-app-sdk — the path all
+# consuming app images COPY --from= and the workflow smokes reference.
+COPY --from=freeze /src/build/exe.linux-x86_64-3.*/ /opt/sdk/bin/
