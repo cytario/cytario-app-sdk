@@ -34,7 +34,7 @@ jobs:
       id-token: write # keyless cosign signing via GitHub OIDC
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Determine version
         id: version
@@ -52,7 +52,7 @@ jobs:
 
       - name: Build and push to Harbor
         id: push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./
           file: freeze/Dockerfile.runtime
@@ -85,7 +85,7 @@ jobs:
             | sudo tar xz -C /usr/local/bin crane
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@v4.1.2
 
       - name: Sign image
         env:
