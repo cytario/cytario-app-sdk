@@ -158,6 +158,27 @@ subprocess environment by default so a broker-unaware algorithm cannot
 accidentally leak them. Pass `--pass-through-env` to keep them (for hybrid
 algorithms that import the SDK and call the broker themselves).
 
+#### Binary base image (non-Python algorithm containers)
+
+When the algorithm image has no Python, use the frozen wrapper binary instead
+of `pip install`: the `cytario-app-sdk-runtime` image (published at
+`harbor.cytario.org/oss/cytario-app-sdk-runtime:<sdk-version>`, on a distroless
+base) contains a self-contained `cytario-app-sdk` executable built with
+cx_Freeze (CPython + boto3 + CA bundle baked in; needs only glibc >= 2.17).
+Layer it onto any distro image:
+
+```dockerfile
+FROM <algorithm-image> # any glibc-based image, no Python needed
+COPY --from=harbor.cytario.org/oss/cytario-app-sdk-runtime:4.0.0 \
+     /opt/sdk/bin/cytario-app-sdk /usr/local/bin/cytario-app-sdk
+ENTRYPOINT ["/usr/local/bin/cytario-app-sdk", "run", "--"]
+CMD ["<algorithm>", "...", "--flags-matching-your-parameterSchema"]
+```
+
+Because the wrapper appends the app parameters as `--<name> <value>` flags to
+the end of the spawned command, an algorithm CLI whose flag names match the
+app-definition parameter names needs no per-app wrapper at all.
+
 ### Library mode (broker-aware algorithms)
 
 The algorithm's Python code imports the SDK and calls the broker directly. This

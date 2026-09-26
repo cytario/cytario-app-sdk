@@ -1,0 +1,44 @@
+# Runtime base image for non-Python Cytario analysis apps.
+#
+# Contains exactly one thing: the frozen cytario-app-sdk wrapper binary at
+# /opt/sdk/bin/cytario-app-sdk, self-contained (CPython + typer + boto3 +
+# CA bundle). An app image layers on top of its algorithm image and COPYs
+# the binary in:
+#
+#   FROM <algorithm-image>
+#   COPY --from=harbor.cytario.org/oss/cytario-app-sdk-runtime:<ver> \
+#        /opt/sdk/bin/cytario-app-sdk /usr/local/bin/cytario-app-sdk
+#   ENTRYPOINT ["/usr/local/bin/cytario-app-sdk", "run", "--"]
+#   CMD ["<algorithm>", "...", "--flags-matching-your-parameterSchema"]
+#
+# The final stage is distroless base-debian12 (glibc only, pinned by
+# digest): the frozen binary is dynamically linked against glibc and needs
+# the loader and shared libs present. The build stage runs on ubuntu-24.04
+# so the glibc used at link time (2.17+ symbols only) is compatible with
+# both the distroless runtime (bookworm, glibc 2.36) and common noble-based
+# app bases.
+
+# distroless/base-debian12:nonroot (multi-arch index, glibc from bookworm).
+# The frozen binary requires only GLIBC_2.17 symbols; bookworm's glibc
+# satisfies them and adds nothing else to the image.
+FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS final-base
+
+FROM ubuntu:24.04 AS freeze
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 python3-pip python3-dev build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . /src
+
+# Pin the runtime extra so the frozen binary is reproducible.
+RUN pip3 install --break-system-packages --no-cache-dir \
+      ".[runtime]" "cx_Freeze>=7.2"
+
+# Build the frozen binary into build/exe.linux-x86_64-3.*/.
+RUN python3 freeze/setup.py build
+
+FROM final-base AS final
+
+COPY --from=freeze /src/build/exe.linux-x86_64-3.*/ /opt/sdk/

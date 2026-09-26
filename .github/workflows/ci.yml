@@ -22,10 +22,10 @@ jobs:
       contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v9.0.0
+        uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
 
@@ -59,3 +59,70 @@ jobs:
           echo "- Ruff check:  ${{ steps.lint_step.outcome }}" >> $GITHUB_STEP_SUMMARY
           echo "- Pytest:       ${{ steps.test_step.outcome }}" >> $GITHUB_STEP_SUMMARY
           echo "- uv build:     ${{ steps.build_step.outcome }}" >> $GITHUB_STEP_SUMMARY
+
+  freeze-build:
+    name: Frozen runtime binary builds & boots
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (with runtime extra)
+        run: uv sync --extra runtime
+
+      - name: Build frozen binary
+        run: uv run --with cx_Freeze python freeze/setup.py build
+
+      - name: Smoke test frozen binary
+        run: |
+          BIN="$(echo build/exe.linux-x86_64-*/cytario-app-sdk)"
+          "$BIN" --help >/dev/null
+          "$BIN" register --dry-run examples/cellseg.yaml >/dev/null
+
+          # Minimal broker stand-in: answers the mint POST with STS-shaped
+          # credentials so the run smoke reaches the spawn phase without
+          # real S3 traffic (no inputs/outputs declared).
+          python3 - <<'EOF' &
+          import json
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+
+          class Mint(BaseHTTPRequestHandler):
+              def do_POST(self):
+                  body = json.dumps({
+                      "accessKeyId": "ASIAEXAMPLE",
+                      "secretAccessKey": "secret",
+                      "sessionToken": "token",
+                      "expiration": "2099-01-01T00:00:00Z",
+                  }).encode()
+                  self.send_response(200)
+                  self.send_header("Content-Type", "application/json")
+                  self.send_header("Content-Length", str(len(body)))
+                  self.end_headers()
+                  self.wfile.write(body)
+              def log_message(self, *args):
+                  pass
+
+          HTTPServer(("127.0.0.1", 9999), Mint).serve_forever()
+          EOF
+
+          CYTARIO_BROKER_ENDPOINT=http://localhost:9999 \
+          CYTARIO_BROKER_TOKEN=dummy \
+          CYTARIO_INPUT_URIS='[]' \
+          CYTARIO_OUTPUT_URI='' \
+          CYTARIO_PARAMETERS='{"tile-size":256,"silent":true}' \
+            "$BIN" run --input-dir "$(mktemp -d)/in" --output-dir "$(mktemp -d)/out" -- /bin/echo ok
+
+      - name: Generate Summary
+        if: always()
+        run: |
+          echo "## Frozen Binary Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY

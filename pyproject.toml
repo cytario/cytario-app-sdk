@@ -28,7 +28,6 @@ keywords = [
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
@@ -120,6 +119,10 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"freeze/*" = [
+  "INP001",  # the cx_Freeze build script is intentionally not a package
+]
+
 "tests/*" = [
   "S101",    # asserts are the point of a test suite
   "S105",    # "hardcoded password" strings are test fixtures
