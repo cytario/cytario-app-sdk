@@ -21,6 +21,17 @@ on:
         description: "The released SDK version (image tag)"
         required: true
         type: string
+    # Declared explicitly so callers forward exactly these — no blanket
+    # secrets: inherit, which would hand every repo/org secret to this
+    # workflow. The consuming job runs in the `dev` environment (declared
+    # on the job below), scoping the robots to dev.
+    secrets:
+      HARBOR_USERNAME:
+        description: "Robot name with push access to the oss project"
+        required: true
+      HARBOR_TOKEN:
+        description: "Robot token with push access to the oss project"
+        required: true
 
 env:
   REGISTRY_HARBOR: harbor.cytario.org
