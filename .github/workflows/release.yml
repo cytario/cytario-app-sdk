@@ -20,6 +20,12 @@ name: Release
 #   publishing (OIDC) — no API token is stored in the repo. The first release
 #   needs the project registered as a PyPI trusted publisher (CONTRIBUTING.md).
 #
+# The `runtime-image` job builds the frozen wrapper binary and publishes the
+# oss/cytario-app-sdk-runtime container image for non-Python apps. It is a
+# workflow_call from runtime-image.yml, gated on a release having been cut —
+# not triggered by the tag push (tags are pushed with GITHUB_TOKEN, which
+# never triggers new workflow runs).
+#
 # Release notes are generated from the Conventional Commits history and
 # attached to the GitHub Release — no CHANGELOG.md file is maintained on the
 # branch.
@@ -137,3 +143,17 @@ jobs:
           echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Version**: ${{ needs.release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "- **PyPI**: https://pypi.org/project/cytario-app-sdk/${{ needs.release.outputs.version }}/" >> $GITHUB_STEP_SUMMARY
+
+  runtime-image:
+    name: Runtime image
+    uses: ./.github/workflows/runtime-image.yml
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    with:
+      version: ${{ needs.release.outputs.version }}
+    permissions:
+      contents: read
+      id-token: write # keyless cosign signing via GitHub OIDC
+    secrets:
+      HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+      HARBOR_TOKEN: ${{ secrets.HARBOR_TOKEN }}

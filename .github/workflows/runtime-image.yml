@@ -2,22 +2,25 @@ name: Runtime image
 
 # Builds the frozen wrapper binary (freeze/setup.py, freeze/Dockerfile.runtime)
 # and publishes it as harbor.cytario.org/oss/cytario-app-sdk-runtime:<ver>, the
-# base image non-Python apps COPY --from= to get wrapper mode. Runs on the
-# release tag push (after the semantic-release job has cut <ver>), so the
-# image version always tracks the SDK version.
+# base image non-Python apps COPY --from= to get wrapper mode.
+#
+# Called from release.yml as a job after the semantic-release job has cut
+# <ver> — NOT triggered by the tag push itself: the tag is pushed by
+# semantic-release using GITHUB_TOKEN, and events created by GITHUB_TOKEN
+# never trigger new workflow runs (GitHub recursion protection), so a tag
+# trigger would never fire in this repo.
 #
 # The image is intentionally public-registry-compatible (oss project): it
 # contains only our own MIT-licensed code and its open-source dependencies,
 # no Cytario-internal material.
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  workflow_call:
+    inputs:
+      version:
+        description: "The released SDK version (image tag)"
+        required: true
+        type: string
 
 env:
   REGISTRY_HARBOR: harbor.cytario.org
@@ -35,10 +38,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-
-      - name: Determine version
-        id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -58,7 +57,7 @@ jobs:
           file: freeze/Dockerfile.runtime
           platforms: linux/amd64
           push: true
-          tags: ${{ env.IMAGE_HARBOR }}:${{ steps.version.outputs.version }}
+          tags: ${{ env.IMAGE_HARBOR }}:${{ inputs.version }}
           cache-from: type=gha,scope=runtime-image
           cache-to: type=gha,mode=max,scope=runtime-image
 
@@ -66,8 +65,8 @@ jobs:
       # its CLI (typer/rich/pydantic all load). The dry-run register mounts
       # the example app-definition from the checkout — the runtime image
       # itself contains only /opt/sdk. The full run path (broker mint,
-      # download, spawn, upload) needs a live broker and is exercised by the
-      # app repos that consume this image.
+      # download, spawn, upload) needs a live broker and is exercised in
+      # the freeze-build CI job.
       - name: Smoke test the frozen binary
         run: |
           docker run --rm \
@@ -94,7 +93,7 @@ jobs:
         run: cosign sign "${IMAGE_HARBOR}@${DIGEST}"
 
       - name: Tag latest (full releases only)
-        if: ${{ !contains(steps.version.outputs.version, '-') }}
+        if: ${{ !contains(inputs.version, '-') }}
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
@@ -104,7 +103,7 @@ jobs:
         if: always()
         env:
           STATUS: ${{ job.status }}
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ inputs.version }}
         run: |
           {
             echo "## Runtime Image Summary"
